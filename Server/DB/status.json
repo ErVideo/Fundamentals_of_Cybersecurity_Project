@@ -1,0 +1,17 @@
+{
+    "Isaia": {
+        "password": "$2b$12$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee",
+        "available": 0,
+        "used": 5
+    },
+    "Mattia": {
+        "password": "$2b$12$ZH0GPD8g5BT/RhD2vb9C9.rHlYmcyrBiOJaLbpHAn8kv8RSjy4.sW",
+        "available": 9,
+        "used": 1
+    },
+    "Giacomo": {
+        "password": "$2b$12$kx/FmMQXjCEy3z4DgUoa1ut7Cq9peWqb6yn.y4uMe2Bv4KWbdKSGO",
+        "available": 10,
+        "used": 0
+    }
+}
