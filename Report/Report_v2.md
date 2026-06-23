@@ -190,8 +190,8 @@ sequenceDiagram
     Server-->>Client: TCP Connection Accepted
     
     Note over Client, Server: Handshake & Cryptographic Setup
-    Note over Client: Generates X25519 Ephemeral Key Pair<br/>(priv_kc_effimera, pub_kc_effimera)
-    Client->>Server: Send pub_kc_effimera (Raw 32 bytes)
+    Note over Client: Generates X25519 Ephemeral Key Pair<br/>(priv_kc_ephemeral, pub_kc_ephemeral)
+    Client->>Server: Send pub_kc_ephemeral (Raw 32 bytes)
     
     Note over Server: Generates X25519 Ephemeral Key Pair<br/>(PrivKc, PubKc)
     Note over Server: Signs server's PubKc bytes using privKts (RSA-4096)
@@ -225,7 +225,7 @@ sequenceDiagram
     
     Note over Client: Prompt user for username and password
     Note over Client: Encrypt credentials dict with ChaCha20Poly1305
-    Client->>Server: Length-prefixed: Nonce (12B) + Ciphertext
+    Client->>Server: Encrypted message: {"username": username, "password": password}
     
     Note over Server: Decrypts credentials dict
     Note over Server: Validates credentials using bcrypt.checkpw()
@@ -235,9 +235,8 @@ sequenceDiagram
         Note over Client: Prints "[-] Login failed!" and exits
     else Credentials Valid
         Note over Server: Prints login success
-        Note over Server: Generates initial session nonce (nonce_1)
-        Note over Server: Encrypts status dict: {"status": "success", "nonce": nonce_1}
-        Server->>Client: Length-prefixed: Nonce (12B) + Ciphertext
+        Note over Server: Generates initial session nonce (nonce_1) 
+        Server->>Client: Encrypted response: {"status": "success", "nonce": nonce_1}
         Note over Client: Decrypts status dict
         Note over Client: Stores nonce_1 in replay_nonce variable
         Note over Client: Prints "[+] Login success!"

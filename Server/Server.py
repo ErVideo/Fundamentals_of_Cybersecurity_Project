@@ -106,7 +106,7 @@ def handshake(conn):
             salt=None,
             info=b"session encryption",
         ).derive(shared_secret)
-    print("[+] Canale sicuro stabilito con successo (PFS abilitato).")
+    print("[+] Secure channel established.")
 
     cipher = ChaCha20Poly1305(session_key)
 
