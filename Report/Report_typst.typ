@@ -14,14 +14,14 @@
   university-logo: image("University_images/Stemma_unipi (1).png"),
 )
 
-#set heading(numbering: "1.1") 
+#set heading(numbering: "1.1")
 
 #outline(
   title: "Index", // Titolo dell'indice
   indent: auto,    // Rientro automatico per i sottotitoli (==)
   depth: 3,        // Profondità (mostra fino ai ===)
 )
-#pagebreak() 
+#pagebreak()
 
 = Overview
 
@@ -89,7 +89,7 @@ After the initial handshake, all communication employs a structured length-prefi
 
 - _Header_: 4 bytes, Big-Endian Unsigned Integer (>I), indicating the length of the payload in bytes.
 
-- Payload: The actual message bytes. For encrypted messages, the payload is structured as: 
+- Payload: The actual message bytes. For encrypted messages, the payload is structured as:
 
   - *Nonce*: 12 bytes (ChaCha20Poly1305 initialization vector).
   - *Ciphertext*: Variable bytes (the encrypted JSON string of the message).
@@ -196,7 +196,7 @@ These jsons are the payloads of the encrypted messages that client and server ex
     "available": <integer_remaining_tokens>,
     "used": <integer_consumed_tokens>,
     "nonce": "<new_rotated_replay_nonce>"
-  } 
+  }
   ```
   ]
 

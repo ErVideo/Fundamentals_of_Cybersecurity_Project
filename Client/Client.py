@@ -17,15 +17,14 @@ PORT_SERVER = 1488
 # Internal messages
 ERROR = "Error"
 
-pubKts = ""
+pubKc = ""
 
-# Load private key
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PATH_PUB_KEY = "../Server/TSA_Keys/pubKts.pem"
+PATH_PUB_KC = "../Server/TSA_Keys/pubKc.pem"
 
-# Load server signing public key
-with open(f"{BASE_DIR}/{PATH_PUB_KEY}", "rb") as key_file:
-    pubKts = serialization.load_pem_public_key(
+# Load server secure-channel authentication public key
+with open(f"{BASE_DIR}/{PATH_PUB_KC}", "rb") as key_file:
+    pubKc = serialization.load_pem_public_key(
         key_file.read()
     )
 
@@ -69,9 +68,9 @@ def handshake(conn):
         server_pub_bytes = server_response[:32]
         signature = server_response[32:]
 
-        # 3. The client with the public key of the server (obtained from a trusted CA) tests the server authenticity
+        # 3. The client uses the server connection public key to test the server authenticity
         try:
-            pubKts.verify(
+            pubKc.verify(
                 signature,
                 server_pub_bytes,
                 padding.PSS(
@@ -249,5 +248,4 @@ while(True):
                 print("[+] Server replied with:")
                 print(json.dumps(decrypted_reply, indent=4))
                 
-
 

@@ -20,27 +20,45 @@ ERROR = "Error"
 # Server configuration
 HOST = "127.0.0.1"
 PORT = 1488
-# Server signing keys
-PATH_PRIV_KEY = "TSA_Keys/privKts.pem"
-PATH_PUB_KEY = "TSA_Keys/pubKts.pem"
+# Server connection-authentication keys
+PATH_PRIV_KC = "TSA_Keys/privKc.pem"
+PATH_PUB_KC = "TSA_Keys/pubKc.pem"
+# Server timestamp-signing keys
+PATH_PRIV_KTS = "TSA_Keys/privKts.pem"
+PATH_PUB_KTS = "TSA_Keys/pubKts.pem"
+privKc = ""
+pubKc = ""
 pubKts = ""
 privKts = ""
-# Load private key
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-with open(f"{BASE_DIR}/{PATH_PRIV_KEY}", "rb") as key_file:
+# Load secure-channel authentication private key
+with open(f"{BASE_DIR}/{PATH_PRIV_KC}", "rb") as key_file:
+    privKc = serialization.load_pem_private_key(
+        key_file.read(),
+        password=None
+    )
+
+# Load secure-channel authentication public key
+with open(f"{BASE_DIR}/{PATH_PUB_KC}", "rb") as key_file:
+    pubKc = serialization.load_pem_public_key(
+        key_file.read()
+    )
+
+# Load timestamp-signing private key
+with open(f"{BASE_DIR}/{PATH_PRIV_KTS}", "rb") as key_file:
     privKts = serialization.load_pem_private_key(
         key_file.read(),
         password=None
     )
 
-# Load public key
-with open(f"{BASE_DIR}/{PATH_PUB_KEY}", "rb") as key_file:
+# Load timestamp-signing public key
+with open(f"{BASE_DIR}/{PATH_PUB_KTS}", "rb") as key_file:
     pubKts = serialization.load_pem_public_key(
         key_file.read()
     )
 
-print("[+] Signing key loaded.")
+print("[+] Connection and timestamp keys loaded.")
 
 
 def send_structured_message(conn, payload_bytes):
@@ -65,10 +83,10 @@ def handshake(conn):
         print("[-] Errore: Client pubblic key invalid.")
         return ERROR
     
-    # Server authentication keys
-    PrivKc = x25519.X25519PrivateKey.generate()
-    PubKc = PrivKc.public_key()
-    server_pub_bytes = PubKc.public_bytes(
+    # Ephemeral key used for this session's X25519 key exchange
+    server_ephemeral_private = x25519.X25519PrivateKey.generate()
+    server_ephemeral_public = server_ephemeral_private.public_key()
+    server_pub_bytes = server_ephemeral_public.public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw
     )
@@ -77,7 +95,7 @@ def handshake(conn):
     print("[<] Received client effimerate key.")
 
     try:
-        signature = privKts.sign(
+        signature = privKc.sign(
             server_pub_bytes,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
@@ -98,7 +116,7 @@ def handshake(conn):
     print("[>] Effimerate + signature sent to client.")
     
     # Simmetric key computation
-    shared_secret = PrivKc.exchange(client_public_key)
+    shared_secret = server_ephemeral_private.exchange(client_public_key)
 
     session_key = HKDF(
             algorithm=hashes.SHA256(),
@@ -305,5 +323,4 @@ while(True):
                 if(json_message["request"] == "quit"):
                     conn.close()
                     break
-
 
