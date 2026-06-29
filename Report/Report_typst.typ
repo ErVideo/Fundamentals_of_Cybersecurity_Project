@@ -6,7 +6,7 @@
   authors: (
     (
       name: "Isaia Porcu - 635930",
-      email: "Federico Volpi - ",
+      email: "Federico Volpi - 615725",
       student-no: "",
     ),
   ),
@@ -33,7 +33,7 @@ The Timestamping Service (TSS) is a client-server application implementing a tru
 
 1. *TSA Server* - _Server/Server.py_: A TCP-based server listening on port 1488. It handles connections, completes the secure handshake, validates credentials, tracks user token balances, issues timestamps, and verifies them.
 
-2. *Client* - _Client/Client-py_: A command-line client enabling users to connect to the server, authenticate, check their usage balance, request timestamps, and verify existing timestamps.
+2. *Client* - _Client/Client.py_: A command-line client enabling users to connect to the server, authenticate, check their usage balance, request timestamps, and verify existing timestamps.
 
 3. *Database Simulator* - _Server/Database.py_: A persistent storage manager that manages registered users in a JSON file; it implements username/password authentication and handles usage counts (_available_ and _used_ timestamps quotas).
 
@@ -43,19 +43,21 @@ The Timestamping Service (TSS) is a client-server application implementing a tru
 
 The service is built around solid cryptographic principles ensuring *Perfect Forward Secrecy*, *authenticity*, *confidentiality* and *integrity*.
 
-- *Server authentication to user*: The server possesses a static RSA-4096 key pair: ($"pubK"_"ts"$, $"privK"_"ts"$).
+- *Server authentication to user*: The server possesses two distinct static RSA-4096 key pairs: ($"pubK"_"ts"$, $"privK"_"ts"$) & ($"pubK"_"c"$, $"privK"_"c"$)
 
-  At the authentication step, the server uses the private key to sign the ephemeral public key generated, the client receiving both the key and the signature can authenticate the server using the signaure public key of the server that he obtained from a *Certification Authotity* (_implied step in the implementation code_).
+  - *Connection Authentication Keys* ($"privK"_c$ / $"pubK"_c$): Used exclusively during the handshake to authenticate the server to the client. The client pre-loads the public key (implying that he gained it from a trusted _CA_).
 
-  $->$ *MitM attack* are prevented this way.
+  $->$ During the handshake, the server signs the ephemeral key transcript using $"privK"_c$. The client verifies this signature using pubKc, confirming the server's identity and preventing *Man-in-the-Middle* (*MitM*) attacks.
+
+  The authentic $"pubK"_c$ is assumed to be provisioned to the client out-of-band, for example through a trusted installation step, a trusted configuration file, or a CA-based mechanism. The client does not learn $"pubK"_c$ from the unauthenticated network session itself.
 
 - *Key exchange*: To implement *PFS*.
 
-  Established using ephemeral *X25519 (ECDH)* keys. Both client and server generate a new key pair for every session.
+  Established using ephemeral *X25519 (ECDH)* keys. Both client and server generate a _new key pair for every session_.
 
 - *Key Derivation Function (KDF)*:
 
-  Once the X25519 shared secret is computed, both parties derive a 32-byte symmetric session key using *HKDF-SHA256* with an info parameter of _b"session encryption"_.
+  Once the X25519 shared secret is computed, both parties derive a 32-byte symmetric session key using *HKDF-SHA256* with an info parameter of _b"session encryption"_ and a salt value of _client_nonce_ $+$ _server_nonce_ (where both nonces are cryptographically secure random 32-byte sequences exchanged in plaintext during the handshake).
 
 - *Symmetric Session Encryption*:
 
@@ -63,7 +65,7 @@ The service is built around solid cryptographic principles ensuring *Perfect For
 
 - *Replay attack mitigation*:
 
-  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session - expecially the most vulnerable message: _the timestamping_), a dynamic nonce-based challenge-response mechanism is implemented:
+  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session - especially the most vulnerable message: _the timestamping_), a dynamic nonce-based challenge-response mechanism is implemented:
 
   1. Upon successful login, the server generates a cryptographically secure random 12-byte hex nonce.
 
@@ -79,7 +81,39 @@ The service is built around solid cryptographic principles ensuring *Perfect For
 
   When a user requests a timestamp for a hash, the server binds the binary hash to the UTC timestamp string (_%Y-%m-%dT%H:%M:%SZ_) by signing the concatenated bundle $"hash"||"timestamp"_"bytes"$ using $"privK"_"ts"$ with *RSA-PSS* padding and *SHA256*.
 
+#pagebreak()
+
+== Algorithm used and security objectives achieved
+
 \
+
+#table(
+  columns: (auto, 2fr, 1.5fr, 2fr),
+  align: (left, left, left, left),
+  stroke: 0.5pt + luma(120),
+  fill: (x, y) => if y == 0 { luma(240) } else { none },
+
+  // Intestazioni
+  [*Primitive / Algorithm*], [*System Component*], [*Primary Security Objective*], [*Mechanism & Verification*],
+
+  // Riga 1
+  [*X25519 (ECDH)*], [Ephemeral Handshake], [Perfect Forward Secrecy (PFS), Confidentiality], [Ephemeral key agreement. Key pairs are deleted after deriving the session key, protecting past traffic.],
+
+  // Riga 2
+  [*HKDF-SHA256*], [Key Derivation], [Session Key Independence], [Extracts uniform entropy from the shared secret and expands it using `client_nonce + server_nonce` as salt to ensure key uniqueness.],
+
+  // Riga 3
+  [*RSA-4096*], [Connection & Timestamp], [Authenticity, Integrity, Non-Repudiation, Malleability Defense], [Ephemeral transcript signed by `privKc` for channel auth; timestamp bundle signed by `privKts`.],
+
+  // Riga 4
+  [*ChaCha20Poly1305*], [Symmetric Session Encryption], [Confidentiality, Integrity, Ciphertext Non-malleability], [Encrypts payload with ChaCha20 stream cipher. Appends a Poly1305 MAC tag to verify authenticity and prevent bit-flipping.],
+
+  // Riga 5
+  [*Bcrypt*], [Database Credential Hashing], [Offline Dictionary & Rainbow Table Protection], [Slow key-stretching ($2^(12)$ rounds) with automatic random 16-byte salting to maximize precomputation and brute-force cost.],
+)
+
+#pagebreak()
+
 
 = Exchanged Message formats
 
@@ -100,16 +134,17 @@ After the initial handshake, all communication employs a structured length-prefi
 
 During the handshake, keys are exchanged in raw binary format without encryption or framing:
 
-1. *Client Ephemeral Public Key (Client -> Server)*:
+1. *Client Ephemeral Public Key + Nonce (Client -> Server)*:
 
-  - _Size_: $32$ bytes.
-  - _Format_: Raw X25519 public key bytes.
+  - _Size_: $64$ bytes.
+  - _Format_: _client_pub_bytes_ ($32$ bytes) concatenated with _client_nonce_ ($32$ bytes).
 
-2. *Server Ephemeral Key + Signature (Server -> Client)*
+2. *Server Ephemeral Key + Nonce + Signature (Server -> Client)*
 
-  - _Size_: 544 bytes.
-  - _Format_: _server_pub_bytes_ ($32$ bytes) concatenated with _signature_ ($512$ bytes).
-    - The signature is an RSA-4096 signature over the $32$-byte server_pub_bytes.
+  - _Size_: 576 bytes.
+  - _Format_: _server_pub_bytes_ ($32$ bytes) concatenated with _server_nonce_ ($32$ bytes) and a _signature_ ($512$ bytes).
+  - The signature is an RSA-4096 signature over the complete handshake transcript:
+    _client_pub_bytes_ $||$ _client_nonce_ $||$ _server_pub_bytes_ $||$ _server_nonce_.
 
 3. *Handshake Confirmation (Server $->$ Client)*:
 
@@ -118,9 +153,12 @@ During the handshake, keys are exchanged in raw binary format without encryption
 
 #pagebreak()
 
-== Post-Handshake Json Schemes
 
-These jsons are the payloads of the encrypted messages that client and server exchanges.
+
+
+== Post-Handshake JSON Schemes
+
+These JSON objects are the payloads of the encrypted messages that client and server exchange.
 
 
 1. *Client Authentication (Login)*:
@@ -190,14 +228,15 @@ These jsons are the payloads of the encrypted messages that client and server ex
 
   - _Success_:
 
-  #text(size: 14pt)[
-  ```json
-  {
-    "available": <integer_remaining_tokens>,
-    "used": <integer_consumed_tokens>,
-    "nonce": "<new_rotated_replay_nonce>"
-  }
-  ```
+	  #text(size: 14pt)[
+	  ```json
+	  {
+	    "hash": "<hex_encoded_document_hash>",
+	    "timestamp": "<UTC_time_string>",
+	    "signature": "<hex_encoded_rsa_pss_signature>",
+	    "nonce": "<new_rotated_replay_nonce>"
+	  }
+	  ```
   ]
 
   - _Failure_ (Quota exhausted):
@@ -275,6 +314,58 @@ These jsons are the payloads of the encrypted messages that client and server ex
 
 #pagebreak()
 
+== Users credentials storage
+
+To safeguard user credentials against server-side compromises, plaintext passwords are never written to disk. The simulator database stores credentials structured as:
+
+\
+
+#text(size: 14pt)[
+  ```json
+"Giacomo": {
+    "password": "$2b$12$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee",
+    "available": 0,
+    "used": 5
+}
+```
+]
+
+\
+
+The following security properties are achieved:
+
+1. *Rainbow Table Prevention*: The random 16-byte salt is _unique_ for every single database entry; precomputed tables of common password hashes cannot be used to recover passwords. If two users share the same password, their hashes will be different.
+
+2. *Timing Side-Channel Protection*: The verification routine extracts the salt and cost parameter from the stored string, hashes the input password using those exact parameters, and performs a *constant-time byte comparison of the resulting hashes*.
+
+\
+
+=== Bcrypt format
+
+The password hash string is exactly 60 characters long and adheres strictly to the modular crypt format utilized by _bcrypt_:
+
+\
+
+#align(center)[
+  Format: \$$<"Variant">$\$$<"Rounds">$\$$<"Salt">$\$$<"Hash">$
+]
+
+\
+
+_Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
+
+- "_\$2b\$_": Identifies the bcrypt algorithm version. The _2b_ variant is the modern standard.
+
+- "_\$12\$_": Defines the work factor as $2^12 = 4096$ iterations of the library underlying algorithm.
+
+- "_BKrwYnXiEXfTQHz2reiiN._": The salt of $22$ characters, randomly generated at registration time.
+
+- "_EHlvWOpnDlCznSo3sxg.AubUYTmBGee_": Hash of $31$ characters.
+
+
+
+#pagebreak()
+
 = Communication protocol & Sequence diagram
 
 1. *Connection & Cryptographic Handshake*: Establishes the secure channel using ephemeral X25519 keys, verifies server authenticity using the pre-shared RSA public key, and derives a session key with PFS.
@@ -346,7 +437,7 @@ These jsons are the payloads of the encrypted messages that client and server ex
 
 = Demo logs
 
-== Sucessful timestamp
+== Successful timestamp
 
 \
 
@@ -405,7 +496,7 @@ Working on verification, please wait...
 ```
 ]
 
-== Un-sucessful timestamp
+== Unsuccessful timestamp
 
 
 \
