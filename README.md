@@ -92,7 +92,7 @@ Example response:
 {
     "available": 9,
     "used": 1,
-    "nonce": "..."
+    "counter": 1
 }
 ```
 
@@ -113,7 +113,7 @@ The server returns:
     "hash": "...",
     "timestamp": "2026-06-21T14:45:30Z",
     "signature": "...",
-    "nonce": "..."
+    "counter": 1
 }
 ```
 
@@ -125,7 +125,7 @@ If the user has no timestamps left, the server returns:
 {
     "status": "failed",
     "message": "Uses exhausted!",
-    "nonce": "..."
+    "counter": 1
 }
 ```
 
@@ -152,7 +152,7 @@ If the timestamp token is valid, the response is:
     "status": "success",
     "valid": true,
     "message": "Timestamp is valid!",
-    "nonce": "..."
+    "counter": 1
 }
 ```
 
@@ -163,7 +163,7 @@ If the hash, timestamp, or signature has been modified, the response is:
     "status": "success",
     "valid": false,
     "message": "Invalid timestamp or altered data!",
-    "nonce": "..."
+    "counter": 1
 }
 ```
 
@@ -183,7 +183,7 @@ pubKts / privKts for timestamp signatures
 
 This implementation uses both pairs:
 
-- `privKc / pubKc` authenticate the server during the secure-channel handshake.
+- `privKc / certKc` authenticate the server during the secure-channel handshake. The certificate contains `pubKc`.
 - `privKts / pubKts` sign and verify timestamp tokens.
 
 To regenerate both key pairs, run:
@@ -192,4 +192,4 @@ To regenerate both key pairs, run:
 python Server/Signing_key_generation.py
 ```
 
-This overwrites the existing files in `Server/TSA_Keys/`.
+This overwrites the existing files in `Server/TSA_Keys/`, including the server certificate `certKc.pem`.

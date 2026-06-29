@@ -162,7 +162,7 @@ def login(conn, cipher):
 
 def timestamp(conn, cipher, hash, username, nonce_replay):
     if db.timeStamp(username) == False:
-        send_structured_message(conn, encrypt_json({"status": "failed", "message": "Uses exhausted!", "nonce": nonce_replay}, cipher))
+        send_structured_message(conn, encrypt_json({"status": "failed", "message": "Uses exhausted!", "counter": nonce_replay}, cipher))
         return
     # Time generation
     current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -180,10 +180,10 @@ def timestamp(conn, cipher, hash, username, nonce_replay):
         )
     except Exception as e:
         print(f"[-] Error during signing process: {e}")
-        send_structured_message(conn,  encrypt_json({"status": "failed", "message": "Signing error", "nonce": nonce_replay}, cipher))
+        send_structured_message(conn,  encrypt_json({"status": "failed", "message": "Signing error", "counter": nonce_replay}, cipher))
         return
     
-    reply = {"hash": hash.hex(), "timestamp": current_time_str, "signature": signature.hex(), "nonce": nonce_replay}
+    reply = {"hash": hash.hex(), "timestamp": current_time_str, "signature": signature.hex(), "counter": nonce_replay}
     send_structured_message(conn,  encrypt_json(reply, cipher))
     db.timeStamped(username)
 
@@ -205,19 +205,19 @@ def verify(conn, cipher, hash, timestamp, signature, nonce_replay):
         )
         # If .verify() doesn't cause exceptions then it's all good!
         print("[+] Verifica riuscita: il timestamp è valido ed autentico.")
-        reply = {"status": "success", "valid": True, "message": "Timestamp is valid!", "nonce": nonce_replay}
+        reply = {"status": "success", "valid": True, "message": "Timestamp is valid!", "counter": nonce_replay}
         
     except Exception as e:
         # If alterations are detected
         print(f"[-] Verifica fallita: firma non valida o dati manipolati! ({e})")
-        reply = {"status": "success", "valid": False, "message": "Invalid timestamp or altered data!", "nonce": nonce_replay}
+        reply = {"status": "success", "valid": False, "message": "Invalid timestamp or altered data!", "counter": nonce_replay}
         
     # 3. Outcome reply
     send_structured_message(conn, encrypt_json(reply, cipher))
 
 def balance(conn, cipher, username, nonce_replay):
     data = db.getData(username)
-    message_json = {"available": data.get("available"), "used": data.get("used"), "nonce": nonce_replay}
+    message_json = {"available": data.get("available"), "used": data.get("used"), "counter": nonce_replay}
     send_structured_message(conn, encrypt_json(message_json, cipher))
 
 def encrypt_json(data_dict, cipher):
@@ -273,9 +273,9 @@ while(True):
                 continue
             
 
-            # Anti-replay attacks nonce (challenge) generation - 12 bytes
-            nonce_replay = os.urandom(12).hex()
-            send_structured_message(conn, encrypt_json({"status": "success", "nonce": nonce_replay}, cipher))
+            # Anti-replay counter, exchanged only inside encrypted JSON messages
+            nonce_replay = 0
+            send_structured_message(conn, encrypt_json({"status": "success", "counter": nonce_replay}, cipher))
 
             # Rapid renaming
             credentials = outcome
@@ -299,13 +299,13 @@ while(True):
                     break
 
                 # Replay attack check
-                if(json_message.get("nonce") != nonce_replay):
+                if(json_message.get("counter") != nonce_replay):
                     print("[-] Replay attack detected!")
                     conn.close()
                     break
 
-                # New nonce
-                nonce_replay = os.urandom(12).hex()
+                # New expected counter
+                nonce_replay += 1
 
                 if(json_message["request"] == "verify"):
                     clean_hash = json_message["hash"].strip()
@@ -314,14 +314,14 @@ while(True):
                         verify(conn, cipher, bytes.fromhex(clean_hash), json_message["timestamp"], bytes.fromhex(clean_sig), nonce_replay)
                     except Exception as e:
                         print("[-] Malformed hash and/or signature")
-                        send_structured_message(conn, encrypt_json({"status": "failed", "nonce": nonce_replay}, cipher))
+                        send_structured_message(conn, encrypt_json({"status": "failed", "counter": nonce_replay}, cipher))
                 if(json_message["request"] == "timestamp"):
                     clean_hash = json_message["hash"].strip()
                     try:
                         timestamp(conn, cipher, bytes.fromhex(clean_hash), credentials["username"], nonce_replay)
                     except Exception as e:
                         print("[-] Malformed hash and/or signature")
-                        send_structured_message(conn, encrypt_json({"status": "failed", "nonce": nonce_replay}, cipher))
+                        send_structured_message(conn, encrypt_json({"status": "failed", "counter": nonce_replay}, cipher))
                 if(json_message["request"] == "balance"):
                     balance(conn, cipher, credentials["username"], nonce_replay)
                 if(json_message["request"] == "quit"):

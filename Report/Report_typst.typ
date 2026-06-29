@@ -45,11 +45,11 @@ The service is built around solid cryptographic principles ensuring *Perfect For
 
 - *Server authentication to user*: The server possesses two distinct static RSA-4096 key pairs: ($"pubK"_"ts"$, $"privK"_"ts"$) & ($"pubK"_"c"$, $"privK"_"c"$)
 
-  - *Connection Authentication Keys* ($"privK"_c$ / $"pubK"_c$): Used exclusively during the handshake to authenticate the server to the client. The client pre-loads the public key (implying that he gained it from a trusted _CA_).
+  - *Connection Authentication Keys* ($"privK"_c$ / $"pubK"_c$): Used exclusively during the handshake to authenticate the server to the client. The public key is bound to a server certificate, which the client loads as its trust anchor.
 
-  $->$ During the handshake, the server signs the ephemeral key transcript using $"privK"_c$. The client verifies this signature using pubKc, confirming the server's identity and preventing *Man-in-the-Middle* (*MitM*) attacks.
+  $->$ During the handshake, the server signs the ephemeral key transcript using $"privK"_c$. The client extracts $"pubK"_c$ from the server certificate and verifies this signature, confirming the server's identity and preventing *Man-in-the-Middle* (*MitM*) attacks.
 
-  The authentic $"pubK"_c$ is assumed to be provisioned to the client out-of-band, for example through a trusted installation step, a trusted configuration file, or a CA-based mechanism. The client does not learn $"pubK"_c$ from the unauthenticated network session itself.
+  The authentic server certificate is assumed to be provisioned to the client out-of-band, for example through a trusted installation step, a trusted configuration file, or a CA-based mechanism. The client does not learn the trust anchor from the unauthenticated network session itself.
 
 - *Key exchange*: To implement *PFS*.
 
@@ -65,17 +65,17 @@ The service is built around solid cryptographic principles ensuring *Perfect For
 
 - *Replay attack mitigation*:
 
-  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session - especially the most vulnerable message: _the timestamping_), a dynamic nonce-based challenge-response mechanism is implemented:
+  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session - especially the most vulnerable message: _the timestamping_), a monotonic counter mechanism is implemented:
 
-  1. Upon successful login, the server generates a cryptographically secure random 12-byte hex nonce.
+  1. Upon successful login, the server initializes the expected request counter to $0$.
 
-  2. The server returns this nonce to the client inside the login outcome JSON.
+  2. The server returns this counter to the client inside the encrypted login outcome JSON.
 
-  3. For every subsequent request (balance, timestamp, verify, quit), the client must include the current nonce in the request payload.
+  3. For every subsequent request (balance, timestamp, verify, quit), the client must include the current counter in the encrypted request payload.
 
-  4. The server decrypts the payload and verifies that the request nonce matches the expected message nonce.
+  4. The server decrypts the payload and verifies that the request counter matches the expected counter.
 
-    - If the nonce is valid, the server immediately generates a new 12-byte random hex nonce, invalidating the old one, and includes the new nonce in its response JSON, which the client stores for its next request.
+    - If the counter is valid, the server increments it and includes the new counter in its encrypted response JSON, which the client stores for its next request.
 
 - *Timestamp signatures*:
 
@@ -174,13 +174,13 @@ These JSON objects are the payloads of the encrypted messages that client and se
 ```
 ]
 
-- Server $->$ Client: The success server reply includes the _first replay-prevention nonce_.
+- Server $->$ Client: The success server reply includes the _first replay-prevention counter_.
 
 #text(size: 14pt)[
   ```json
 {
   "status": "success",
-  "nonce": "<12_byte_hex_nonce>"
+  "counter": 0
 }
 ```
 ]
@@ -193,7 +193,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
   ```json
 {
   "request": "balance",
-  "nonce": "<current_replay_nonce>"
+  "counter": <current_replay_counter>
 }
 ```
 ]
@@ -205,7 +205,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
 {
   "available": <integer_remaining_tokens>,
   "used": <integer_consumed_tokens>,
-  "nonce": "<new_rotated_replay_nonce>"
+  "counter": <new_replay_counter>
 }
 ```
 ]
@@ -219,7 +219,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
 {
   "request": "timestamp",
   "hash": "<hex_encoded_document_hash>",
-  "nonce": "<current_replay_nonce>"
+  "counter": <current_replay_counter>
 }
 ```
 ]
@@ -234,7 +234,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
 	    "hash": "<hex_encoded_document_hash>",
 	    "timestamp": "<UTC_time_string>",
 	    "signature": "<hex_encoded_rsa_pss_signature>",
-	    "nonce": "<new_rotated_replay_nonce>"
+	    "counter": <new_replay_counter>
 	  }
 	  ```
   ]
@@ -244,10 +244,10 @@ These JSON objects are the payloads of the encrypted messages that client and se
   #text(size: 14pt)[
   ```json
   {
-    "status": "failed",
-    "message": "Uses exhausted!",
-    "nonce": "<new_rotated_replay_nonce>"
-  }
+	    "status": "failed",
+	    "message": "Uses exhausted!",
+	    "counter": <new_replay_counter>
+	  }
   ```
   ]
 
@@ -262,7 +262,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
   "hash": "<hex_encoded_document_hash>",
   "timestamp": "<UTC_time_string>",
   "signature": "<hex_encoded_rsa_pss_signature>",
-  "nonce": "<current_replay_nonce>"
+  "counter": <current_replay_counter>
 }
 ```
 ]
@@ -277,7 +277,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
     "status": "success",
     "valid": true,
     "message": "Timestamp is valid!",
-    "nonce": "<new_rotated_replay_nonce>"
+    "counter": <new_replay_counter>
   }
   ```
   ]
@@ -290,7 +290,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
     "status": "success",
     "valid": false,
     "message": "Invalid timestamp or altered data!",
-    "nonce": "<new_rotated_replay_nonce>"
+    "counter": <new_replay_counter>
   }
   ```
   ]
@@ -305,7 +305,7 @@ These JSON objects are the payloads of the encrypted messages that client and se
   ```json
 {
   "request": "quit",
-  "nonce": "<current_replay_nonce>"
+  "counter": <current_replay_counter>
 }
 ```
 ]
@@ -368,7 +368,7 @@ _Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
 
 = Communication protocol & Sequence diagram
 
-1. *Connection & Cryptographic Handshake*: Establishes the secure channel using ephemeral X25519 keys, verifies server authenticity using the pre-shared RSA public key, and derives a session key with PFS.
+1. *Connection & Cryptographic Handshake*: Establishes the secure channel using ephemeral X25519 keys, verifies server authenticity using the server certificate, and derives a session key with PFS.
 
 \
 
@@ -378,7 +378,7 @@ _Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
 
 #pagebreak()
 
-2. *Client Authentication (Login) & Nonce Initialization*: Validates the client's identity and issues the initial session nonce.
+2. *Client Authentication (Login) & Counter Initialization*: Validates the client's identity and issues the initial encrypted session counter.
 
 \
 
@@ -389,7 +389,7 @@ _Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
 #pagebreak()
 
 
-3. *Session operations*: For every subsequent transaction, the client submits the current nonce. The server validates it, rotates it, and returns the new nonce.
+3. *Session operations*: For every subsequent transaction, the client submits the current counter inside the encrypted payload. The server validates it, increments it, and returns the new counter.
 
 - _Balance_:
 
@@ -457,7 +457,7 @@ Working on timestamping, please wait...
     "hash": "7b5cb4e5a9757657158434771605ec10e30d1d29fc2f0e0f3be8f45a278917e3",
     "timestamp": "2026-06-21T19:02:54Z",
     "signature": "15d49ddf5e8d43bdecca5a9b037db49b48bad4995e75ea3dfa7528135dc4bdf90e...",
-    "nonce": "77301cab77dcb540c7f01b27"
+    "counter": 1
 }
 Welcome! What do you want to do?
 0 - See my balance.
@@ -491,7 +491,7 @@ Working on verification, please wait...
     "status": "success",
     "valid": true,
     "message": "Timestamp is valid!",
-    "nonce": "0d5b5a8bcefe6c8c3624e552"
+    "counter": 2
 }
 ```
 ]
@@ -524,7 +524,7 @@ Send request n. 0
 {
     "available": 0,
     "used": 5,
-    "nonce": "5c392eb66ba74cefdf7a9949"
+    "counter": 1
 }
 Welcome! What do you want to do?
 0 - See my balance.
@@ -538,7 +538,7 @@ Working on timestamping, please wait...
 {
     "status": "failed",
     "message": "Uses exhausted!",
-    "nonce": "6fbec3958f5b07e394c52ba9"
+    "counter": 2
 }
 Welcome! What do you want to do?
 0 - See my balance.

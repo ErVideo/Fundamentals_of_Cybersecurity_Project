@@ -3,6 +3,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
+from cryptography import x509
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from datetime import datetime, timezone
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -20,12 +21,17 @@ ERROR = "Error"
 pubKc = ""
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PATH_PUB_KC = "../Server/TSA_Keys/pubKc.pem"
+PATH_CERT_KC = "../Server/TSA_Keys/certKc.pem"
 
-# Load server secure-channel authentication public key
-with open(f"{BASE_DIR}/{PATH_PUB_KC}", "rb") as key_file:
-    pubKc = serialization.load_pem_public_key(
-        key_file.read()
+# Load server secure-channel authentication certificate
+with open(f"{BASE_DIR}/{PATH_CERT_KC}", "rb") as cert_file:
+    certKc = x509.load_pem_x509_certificate(cert_file.read())
+    pubKc = certKc.public_key()
+    pubKc.verify(
+        certKc.signature,
+        certKc.tbs_certificate_bytes,
+        padding.PKCS1v15(),
+        certKc.signature_hash_algorithm
     )
 
 def send_structured_message(conn, payload_bytes):
@@ -125,12 +131,12 @@ def login(conn, cipher, data_dic):
     reply_json = decrypt_json(cipher, nonce, ciphertext)
     try:
         if reply_json.get("status") == "success":
-            return {"status": True, "nonce": reply_json.get("nonce")}
+            return {"status": True, "counter": reply_json.get("counter")}
         else:
             return False
     except Exception as e:
         print("[-] Fatal error in json outcome receiving")
-        return {"status": False, "nonce": reply_json.get("nonce")}
+        return {"status": False, "counter": reply_json.get("counter")}
 
 def encrypt_json(data_dict, cipher):
     json_string = json.dumps(data_dict)
@@ -189,8 +195,8 @@ while(True):
                 conn.close()
                 exit()
 
-            # Server nonce for anti-replay attacks
-            replay_nonce = login_outcome.get("nonce")
+            # Server counter for anti-replay attacks
+            replay_counter = login_outcome.get("counter")
             
             print("[+] Login success!")
 
@@ -209,19 +215,19 @@ while(True):
                     continue
 
                 if(int(option) == 0):
-                    message = {"request": "balance", "nonce": replay_nonce}
+                    message = {"request": "balance", "counter": replay_counter}
                 if(int(option) == 1):
                     h = input("Inserisci l'hash del documento (in formato HEX): ")
                     t = input("Inserisci il timestamp (es. 2026-06-21T14:45:30Z): ")
                     s = input("Inserisci la firma (in formato HEX): ")
                     print("Working on verification, please wait...")
-                    message = {"request": "verify", "hash": h, "timestamp": t, "signature": s, "nonce": replay_nonce}
+                    message = {"request": "verify", "hash": h, "timestamp": t, "signature": s, "counter": replay_counter}
                 if(int(option) == 2):
                     h = input("Inserisci l'hash del documento da firmare (in formato HEX): ")
                     print("Working on timestamping, please wait...")
-                    message = {"request": "timestamp", "hash": h, "nonce": replay_nonce}
+                    message = {"request": "timestamp", "hash": h, "counter": replay_counter}
                 if(int(option) == 3):
-                    message = {"request": "quit", "nonce": replay_nonce}
+                    message = {"request": "quit", "counter": replay_counter}
 
                 # Request sending
                 encrypted_message = encrypt_json(message, cipher)
@@ -243,9 +249,9 @@ while(True):
 
                 decrypted_reply = decrypt_json(cipher, nonce, ciphertext)
 
-                # New anti-replay nonce
-                if "nonce" in decrypted_reply:
-                    replay_nonce = decrypted_reply["nonce"]
+                # New anti-replay counter
+                if "counter" in decrypted_reply:
+                    replay_counter = decrypted_reply["counter"]
 
                 # Printing
                 print("[+] Server replied with:")
