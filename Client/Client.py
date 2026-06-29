@@ -54,25 +54,28 @@ def handshake(conn):
             format=serialization.PublicFormat.Raw
         )
 
-        conn.sendall(client_pub_bytes)
+        client_nonce = os.urandom(32)
+        conn.sendall(client_pub_bytes + client_nonce)
         print("[>] Sending effimerate key to Server.")
 
         # 2. Ricezione del blocco combinato dal server
-        # X25519 = 32 byte and RSA-4096 signature = 512 byte -> reading 544 byte total
-        server_response = conn.recv(544)
-        if len(server_response) < 544:
+        # X25519 = 32 byte, server nonce = 32 byte and RSA-4096 signature = 512 byte -> reading 576 byte total
+        server_response = conn.recv(576)
+        if len(server_response) < 576:
             print("[-] Errore: Risposta dell'handshake incompleta.")
             return ERROR
 
-        # First 32 byte are the key, remaining is the signature
+        # First 32 byte are the key, next 32 byte are the nonce, remaining is the signature
         server_pub_bytes = server_response[:32]
-        signature = server_response[32:]
+        server_nonce = server_response[32:64]
+        signature = server_response[64:]
+        transcript = client_pub_bytes + client_nonce + server_pub_bytes + server_nonce
 
         # 3. The client uses the server connection public key to test the server authenticity
         try:
             pubKc.verify(
                 signature,
-                server_pub_bytes,
+                transcript,
                 padding.PSS(
                     mgf=padding.MGF1(hashes.SHA256()),
                     salt_length=padding.PSS.MAX_LENGTH
@@ -92,7 +95,7 @@ def handshake(conn):
         session_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=None,
+            salt=client_nonce + server_nonce,
             info=b"session encryption",
         ).derive(shared_secret)
         print("[+] Canale sicuro stabilito (PFS abilitato).")
@@ -248,4 +251,3 @@ while(True):
                 print("[+] Server replied with:")
                 print(json.dumps(decrypted_reply, indent=4))
                 
-

@@ -77,11 +77,13 @@ def receive_structured_message(conn):
     return conn.recv(lunghezza)
 
 def handshake(conn):
-    # Receives client effimerate key
-    client_pub_bytes = conn.recv(32)
-    if len(client_pub_bytes) != 32:
-        print("[-] Errore: Client pubblic key invalid.")
+    # Receives client effimerate key and nonce
+    client_hello = conn.recv(64)
+    if len(client_hello) != 64:
+        print("[-] Errore: Client hello invalid.")
         return ERROR
+    client_pub_bytes = client_hello[:32]
+    client_nonce = client_hello[32:]
     
     # Ephemeral key used for this session's X25519 key exchange
     server_ephemeral_private = x25519.X25519PrivateKey.generate()
@@ -92,11 +94,13 @@ def handshake(conn):
     )
     
     client_public_key = x25519.X25519PublicKey.from_public_bytes(client_pub_bytes)
+    server_nonce = os.urandom(32)
+    transcript = client_pub_bytes + client_nonce + server_pub_bytes + server_nonce
     print("[<] Received client effimerate key.")
 
     try:
         signature = privKc.sign(
-            server_pub_bytes,
+            transcript,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
                 salt_length=padding.PSS.MAX_LENGTH
@@ -108,8 +112,8 @@ def handshake(conn):
         send_structured_message(conn,  b"Signing failed!")
         return
 
-    # Effimerate key (32 byte) and RSA sign (512 byte) combining
-    handshake_payload = server_pub_bytes + signature
+    # Effimerate key (32 byte), nonce (32 byte) and RSA sign (512 byte) combining
+    handshake_payload = server_pub_bytes + server_nonce + signature
     
     # Send the bundle to the client
     conn.sendall(handshake_payload)
@@ -121,7 +125,7 @@ def handshake(conn):
     session_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=None,
+            salt=client_nonce + server_nonce,
             info=b"session encryption",
         ).derive(shared_secret)
     print("[+] Secure channel established.")
@@ -323,4 +327,3 @@ while(True):
                 if(json_message["request"] == "quit"):
                     conn.close()
                     break
-
