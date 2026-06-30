@@ -16,76 +16,197 @@
 
 #set heading(numbering: "1.1")
 
+#show raw.where(block: true, lang: "json"): it => block(
+  width: 100%,
+  fill: rgb("#f7f9fb"),
+  stroke: 0.7pt + rgb("#cfd7e3"),
+  radius: 4pt,
+  inset: (x: 10pt, y: 8pt),
+)[
+  #set text(size: 9.5pt)
+  #it
+]
+
 #outline(
-  title: "Index", // Titolo dell'indice
-  indent: auto,    // Rientro automatico per i sottotitoli (==)
-  depth: 3,        // Profondità (mostra fino ai ===)
+  title: "Index",
+  indent: auto,
+  depth: 3,
 )
 #pagebreak()
 
-= Overview
+= Introduction
 
-The Timestamping Service (TSS) is a client-server application implementing a trusted third-party Time Stamping Authority (TSA). It allows registered users to submit cryptographic hashes of files/documents and receive back a cryptographically signed token binding the document's hash to a trusted timestamp. Users can subsequently verify these tokens to prove a document's existence at a specific time.
+This project implements a *Cryptographic Timestamping Service*. The idea is simple: a user wants to prove that a certain document already existed at a certain moment in time, without sending the whole document to the server.
 
-\
+Instead of uploading the file, the user computes its cryptographic hash and sends only that hash to the service. The server, which plays the role of a trusted Time Stamping Authority (TSA), attaches the current UTC time to the hash and signs the result. The signed result is the timestamp token.
 
-== Architectural components
+Later, anyone can verify the token by checking the signature over the same document hash and timestamp. If the verification succeeds, then the hash and timestamp have not been modified and the token was produced by the TSA private signing key.
 
-1. *TSA Server* - _Server/Server.py_: A TCP-based server listening on port 1488. It handles connections, completes the secure handshake, validates credentials, tracks user token balances, issues timestamps, and verifies them.
+The service therefore answers the question:
 
-2. *Client* - _Client/Client.py_: A command-line client enabling users to connect to the server, authenticate, check their usage balance, request timestamps, and verify existing timestamps.
+#align(center)[
+  *"Can I prove that this exact document existed before this time?"*
+]
 
-3. *Database Simulator* - _Server/Database.py_: A persistent storage manager that manages registered users in a JSON file; it implements username/password authentication and handles usage counts (_available_ and _used_ timestamps quotas).
+The answer is yes, as long as the verifier trusts the TSA signing key and the submitted hash really belongs to the document being claimed.
 
-\
+== Main actors
 
-= Cryptographic design and primitives
+The system has three components:
 
-The service is built around solid cryptographic principles ensuring *Perfect Forward Secrecy*, *authenticity*, *confidentiality* and *integrity*.
+1. *Client* - _Client/Client.py_
 
-- *Server authentication to user*: The server possesses two distinct static RSA-4096 key pairs: ($"pubK"_"ts"$, $"privK"_"ts"$) & ($"pubK"_"c"$, $"privK"_"c"$)
+  The command-line program used by the user. It connects to the server, authenticates, asks for the account balance, requests new timestamps, and verifies existing timestamp tokens.
 
-  - *Connection Authentication Keys* ($"privK"_c$ / $"pubK"_c$): Used exclusively during the handshake to authenticate the server to the client. The client pre-loads the public key (implying that he gained it from a trusted _CA_).
+2. *TSA Server* - _Server/Server.py_
 
-  $->$ During the handshake, the server signs the ephemeral key transcript using $"privK"_c$. The client verifies this signature using pubKc, confirming the server's identity and preventing *Man-in-the-Middle* (*MitM*) attacks.
+  The TCP server listening on port _1488_. It authenticates itself to the client, creates a protected communication channel, checks user credentials, manages timestamp quotas, signs timestamp tokens, and verifies signatures.
 
-  The authentic $"pubK"_c$ is assumed to be provisioned to the client out-of-band, for example through a trusted installation step, a trusted configuration file, or a CA-based mechanism. The client does not learn $"pubK"_c$ from the unauthenticated network session itself.
+3. *Database simulator* - _Server/Database.py_
 
-- *Key exchange*: To implement *PFS*.
+  A JSON-based persistent storage component. It stores registered users, bcrypt password hashes, and two counters: _available_ timestamps and _used_ timestamps.
 
-  Established using ephemeral *X25519 (ECDH)* keys. Both client and server generate a _new key pair for every session_.
+== What a timestamp token contains
 
-- *Key Derivation Function (KDF)*:
+A successful timestamp response contains three important fields:
 
-  Once the X25519 shared secret is computed, both parties derive a 32-byte symmetric session key using *HKDF-SHA256* with an info parameter of _b"session encryption"_ and a salt value of _client_nonce_ $+$ _server_nonce_ (where both nonces are cryptographically secure random 32-byte sequences exchanged in plaintext during the handshake).
+- the document hash, encoded in hexadecimal;
+- the UTC timestamp generated by the server;
+- an RSA-PSS signature over the binary hash concatenated with the timestamp bytes.
 
-- *Symmetric Session Encryption*:
+In formula form, the server signs:
 
-  All exchange messages post-handshake are encrypted using *ChaCha20Poly1305* (_an Authenticated Encryption with Associated Data_ - AEAD scheme). This protects the communication against eavesdropping and ensures message *non-malleability*.
+#align(center)[
+  $"hash" || "timestamp"_"bytes"$
+]
 
-- *Replay attack mitigation*:
-
-  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session - especially the most vulnerable message: _the timestamping_), a dynamic nonce-based challenge-response mechanism is implemented:
-
-  1. Upon successful login, the server generates a cryptographically secure random 12-byte hex nonce.
-
-  2. The server returns this nonce to the client inside the login outcome JSON.
-
-  3. For every subsequent request (balance, timestamp, verify, quit), the client must include the current nonce in the request payload.
-
-  4. The server decrypts the payload and verifies that the request nonce matches the expected message nonce.
-
-    - If the nonce is valid, the server immediately generates a new 12-byte random hex nonce, invalidating the old one, and includes the new nonce in its response JSON, which the client stores for its next request.
-
-- *Timestamp signatures*:
-
-  When a user requests a timestamp for a hash, the server binds the binary hash to the UTC timestamp string (_%Y-%m-%dT%H:%M:%SZ_) by signing the concatenated bundle $"hash"||"timestamp"_"bytes"$ using $"privK"_"ts"$ with *RSA-PSS* padding and *SHA256*.
+The signature is what makes the token trustworthy. If an attacker changes the hash or the timestamp, the signature verification fails.
 
 #pagebreak()
 
-== Algorithm used and security objectives achieved
+= Security Goals
 
-\
+The service is designed around four practical security goals.
+
+== Confidentiality
+
+After the handshake, all client-server messages are encrypted. An attacker observing the network should not be able to read usernames, passwords, requested hashes, balances, signatures, or verification requests.
+
+This is provided by *ChaCha20Poly1305*, an authenticated encryption scheme.
+
+== Integrity
+
+Messages must not be silently changed in transit. If an attacker modifies an encrypted command, the receiver should reject it.
+
+ChaCha20Poly1305 also provides this property because each ciphertext includes an authentication tag. If the ciphertext is altered, decryption fails.
+
+== Server authenticity
+
+The client must know that it is talking to the real TSA server, not to a machine placed in the middle of the connection.
+
+The server owns a long-term RSA-4096 key pair used for connection authentication:
+
+#align(center)[
+  ($"pubK"_"c"$, $"privK"_"c"$)
+]
+
+The client already has the authentic public key $"pubK"_"c"$ before the connection starts. During the handshake, the server signs the handshake transcript with $"privK"_"c"$. The client verifies the signature with $"pubK"_"c"$.
+
+This prevents a Man-in-the-Middle attacker from replacing the server key exchange values, because the attacker cannot create a valid signature without the server private key.
+
+== Perfect Forward Secrecy
+
+If a long-term server key is compromised in the future, old encrypted sessions should still remain protected.
+
+For this reason, the session key is not encrypted with RSA and sent across the network. Instead, the client and server generate fresh *X25519 ephemeral keys* for each connection and derive a shared secret. These ephemeral private keys are used only for that session.
+
+The shared secret is then processed with *HKDF-SHA256* to obtain the final 32-byte session key used by ChaCha20Poly1305.
+
+#pagebreak()
+
+= Cryptographic Design
+
+This section explains each primitive by its role in the system.
+
+== Secure channel setup
+
+Before the client can send credentials or timestamp requests, the two sides establish a secure channel.
+
+1. The client generates a fresh X25519 ephemeral key pair and a 32-byte random nonce.
+2. The client sends its public key and nonce to the server.
+3. The server generates its own fresh X25519 ephemeral key pair and a 32-byte random nonce.
+4. The server signs the complete handshake transcript with its RSA connection-authentication private key.
+5. The client verifies the signature using the server public key already stored locally.
+6. Both sides compute the same X25519 shared secret.
+7. Both sides derive the same symmetric session key with HKDF-SHA256.
+8. From this point on, application messages are encrypted with ChaCha20Poly1305.
+
+The transcript signed by the server is:
+
+#align(center)[
+  $"client_pub" || "client_nonce" || "server_pub" || "server_nonce"$
+]
+
+Signing the whole transcript is important because it binds together both parties' public key exchange values and both random nonces. The client is not only checking that the server signed something; it is checking that the server signed the exact handshake that the client participated in.
+
+== Key derivation
+
+The raw X25519 shared secret is not used directly as an encryption key. Both sides run it through HKDF-SHA256:
+
+- _input key material_: the X25519 shared secret;
+- _salt_: _client_nonce_ + _server_nonce_;
+- _info_: _b"session encryption"_;
+- _output_: a 32-byte session key.
+
+The salt makes the derived key depend on fresh randomness from both sides. The _info_ string gives the derived key a clear purpose: session encryption.
+
+== Encrypted messages
+
+After the handshake, every application message is a JSON object encrypted with ChaCha20Poly1305. The encrypted payload contains:
+
+- a 12-byte ChaCha20Poly1305 nonce;
+- the ciphertext, which also includes the authentication tag.
+
+This means the protocol protects both secrecy and tamper detection for post-handshake messages.
+
+== Timestamp signing
+
+The service uses a second RSA-4096 key pair for timestamp tokens:
+
+#align(center)[
+  ($"pubK"_"ts"$, $"privK"_"ts"$)
+]
+
+This key pair is separate from the connection-authentication key pair. Keeping these roles separate is good design: one key authenticates the server during the secure channel setup, while the other key signs long-lived timestamp tokens.
+
+When a timestamp is requested, the server signs:
+
+#align(center)[
+  $"hash" || "timestamp"_"bytes"$
+]
+
+using *RSA-PSS* padding and *SHA256*. RSA-PSS is used instead of older deterministic RSA signature padding because it is the modern randomized padding scheme recommended for RSA signatures.
+
+== Replay protection
+
+Encryption alone does not automatically stop replay attacks. An attacker may not be able to read an encrypted message, but might still record it and send the same bytes again.
+
+This is especially relevant for timestamp requests, because replaying a previously valid request could consume a user's quota or repeat an operation.
+
+To reduce this risk, the server maintains a changing replay nonce after login:
+
+1. After a successful login, the server generates a random 12-byte value encoded as hex.
+2. The server sends this value to the client inside the encrypted login response.
+3. Every later client request must include the current replay nonce in the JSON body.
+4. The server checks the received value against the expected one.
+5. If it matches, the server immediately generates a new replay nonce and returns it in the response.
+6. If it does not match, the server treats the message as suspicious and closes the connection.
+
+The important idea is that each nonce is valid only once. A captured old request contains an old nonce, so it will not match the server's current expected value.
+
+#pagebreak()
+
+== Summary of primitives
 
 #table(
   columns: (auto, 2fr, 1.5fr, 2fr),
@@ -93,80 +214,67 @@ The service is built around solid cryptographic principles ensuring *Perfect For
   stroke: 0.5pt + luma(120),
   fill: (x, y) => if y == 0 { luma(240) } else { none },
 
-  // Intestazioni
-  [*Primitive / Algorithm*], [*System Component*], [*Primary Security Objective*], [*Mechanism & Verification*],
+  [*Primitive*], [*Where it is used*], [*Security goal*], [*Explanation*],
 
-  // Riga 1
-  [*X25519 (ECDH)*], [Ephemeral Handshake], [Perfect Forward Secrecy (PFS), Confidentiality], [Ephemeral key agreement. Key pairs are deleted after deriving the session key, protecting past traffic.],
+  [*X25519*], [Handshake], [Perfect Forward Secrecy], [Client and server create fresh ephemeral keys for each session and derive a shared secret without sending it over the network.],
 
-  // Riga 2
-  [*HKDF-SHA256*], [Key Derivation], [Session Key Independence], [Extracts uniform entropy from the shared secret and expands it using `client_nonce + server_nonce` as salt to ensure key uniqueness.],
+  [*HKDF-SHA256*], [Session key derivation], [Key separation and key quality], [Transforms the X25519 shared secret into a 32-byte symmetric key, using both handshake nonces as salt.],
 
-  // Riga 3
-  [*RSA-4096*], [Connection & Timestamp], [Authenticity, Integrity, Non-Repudiation, Malleability Defense], [Ephemeral transcript signed by `privKc` for channel auth; timestamp bundle signed by `privKts`.],
+  [*RSA-4096 with PSS*], [Server authentication and timestamp signatures], [Authenticity and integrity], [The connection key signs the handshake transcript; the timestamp key signs the hash plus timestamp bundle.],
 
-  // Riga 4
-  [*ChaCha20Poly1305*], [Symmetric Session Encryption], [Confidentiality, Integrity, Ciphertext Non-malleability], [Encrypts payload with ChaCha20 stream cipher. Appends a Poly1305 MAC tag to verify authenticity and prevent bit-flipping.],
+  [*ChaCha20Poly1305*], [Encrypted session traffic], [Confidentiality and integrity], [Encrypts JSON messages and rejects modified ciphertexts through its authentication tag.],
 
-  // Riga 5
-  [*Bcrypt*], [Database Credential Hashing], [Offline Dictionary & Rainbow Table Protection], [Slow key-stretching ($2^(12)$ rounds) with automatic random 16-byte salting to maximize precomputation and brute-force cost.],
+  [*Bcrypt*], [Password storage], [Password protection at rest], [Stores salted, slow password hashes instead of plaintext passwords.],
 )
 
 #pagebreak()
 
+= Message Formats
 
-= Exchanged Message formats
+This section describes what is actually sent on the network.
 
 == Framing
 
-After the initial handshake, all communication employs a structured length-prefixed protocol:
+After the initial raw handshake, messages use a length-prefixed format:
 
-- _Header_: 4 bytes, Big-Endian Unsigned Integer (>I), indicating the length of the payload in bytes.
+1. *Header*: 4 bytes, big-endian unsigned integer (_>I_), containing the payload length.
+2. *Payload*: the message bytes.
 
-- Payload: The actual message bytes. For encrypted messages, the payload is structured as:
+For encrypted application messages, the payload is:
 
-  - *Nonce*: 12 bytes (ChaCha20Poly1305 initialization vector).
-  - *Ciphertext*: Variable bytes (the encrypted JSON string of the message).
+1. *Encryption nonce*: 12 bytes, used by ChaCha20Poly1305.
+2. *Ciphertext*: encrypted JSON plus authentication tag.
 
-\
+This framing lets the receiver know exactly how many bytes belong to the next message.
 
-== Plaintext handshake messages
+== Plaintext handshake
 
-During the handshake, keys are exchanged in raw binary format without encryption or framing:
+The first handshake values are not encrypted yet, because their purpose is to create the encrypted channel.
 
-1. *Client Ephemeral Public Key + Nonce (Client -> Server)*:
+1. *Client hello* - Client $->$ Server
 
-  - _Size_: $64$ bytes.
-  - _Format_: _client_pub_bytes_ ($32$ bytes) concatenated with _client_nonce_ ($32$ bytes).
+  - _Size_: 64 bytes.
+  - _Format_: _client_pub_bytes_ (32 bytes) followed by _client_nonce_ (32 bytes).
 
-2. *Server Ephemeral Key + Nonce + Signature (Server -> Client)*
+2. *Server hello* - Server $->$ Client
 
   - _Size_: 576 bytes.
-  - _Format_: _server_pub_bytes_ ($32$ bytes) concatenated with _server_nonce_ ($32$ bytes) and a _signature_ ($512$ bytes).
-  - The signature is an RSA-4096 signature over the complete handshake transcript:
-    _client_pub_bytes_ $||$ _client_nonce_ $||$ _server_pub_bytes_ $||$ _server_nonce_.
+  - _Format_: _server_pub_bytes_ (32 bytes), _server_nonce_ (32 bytes), and _signature_ (512 bytes).
+  - _Signature input_: _client_pub_bytes_ $||$ _client_nonce_ $||$ _server_pub_bytes_ $||$ _server_nonce_.
 
-3. *Handshake Confirmation (Server $->$ Client)*:
+3. *Handshake confirmation* - Server $->$ Client
 
-  - _Format_: Length-prefixed message ($4$-byte header + $20$-byte payload).
-  - _Payload_: _b"Handshake successful"_
+  - _Format_: length-prefixed message.
+  - _Payload_: _b"Handshake successful"_.
 
-#pagebreak()
+== Login
 
-
-
-
-== Post-Handshake JSON Schemes
-
-These JSON objects are the payloads of the encrypted messages that client and server exchange.
-
-
-1. *Client Authentication (Login)*:
+The login request is the first encrypted JSON message.
 
 - Client $->$ Server:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "username": "<username_string>",
   "password": "<password_string>"
@@ -174,23 +282,25 @@ These JSON objects are the payloads of the encrypted messages that client and se
 ```
 ]
 
-- Server $->$ Client: The success server reply includes the _first replay-prevention nonce_.
+- Server $->$ Client:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "status": "success",
-  "nonce": "<12_byte_hex_nonce>"
+  "nonce": "<initial_replay_nonce>"
 }
 ```
 ]
 
-2. *Balance Check*:
+If login fails, the server closes the connection instead of continuing the session.
+
+== Balance check
 
 - Client $->$ Server:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "request": "balance",
   "nonce": "<current_replay_nonce>"
@@ -200,22 +310,22 @@ These JSON objects are the payloads of the encrypted messages that client and se
 
 - Server $->$ Client:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "available": <integer_remaining_tokens>,
   "used": <integer_consumed_tokens>,
-  "nonce": "<new_rotated_replay_nonce>"
+  "nonce": "<new_replay_nonce>"
 }
 ```
 ]
 
-3. *Hash Timestamping*:
+== Timestamp request
 
 - Client $->$ Server:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "request": "timestamp",
   "hash": "<hex_encoded_document_hash>",
@@ -224,39 +334,37 @@ These JSON objects are the payloads of the encrypted messages that client and se
 ```
 ]
 
-- Server $->$ Client:
+- Server $->$ Client, when the user still has available timestamps:
 
-  - _Success_:
+#text(size: 12pt)[
+```json
+{
+  "hash": "<hex_encoded_document_hash>",
+  "timestamp": "<UTC_time_string>",
+  "signature": "<hex_encoded_rsa_pss_signature>",
+  "nonce": "<new_replay_nonce>"
+}
+```
+]
 
-	  #text(size: 14pt)[
-	  ```json
-	  {
-	    "hash": "<hex_encoded_document_hash>",
-	    "timestamp": "<UTC_time_string>",
-	    "signature": "<hex_encoded_rsa_pss_signature>",
-	    "nonce": "<new_rotated_replay_nonce>"
-	  }
-	  ```
-  ]
+- Server $->$ Client, when the quota is exhausted:
 
-  - _Failure_ (Quota exhausted):
+#text(size: 12pt)[
+```json
+{
+  "status": "failed",
+  "message": "Uses exhausted!",
+  "nonce": "<new_replay_nonce>"
+}
+```
+]
 
-  #text(size: 14pt)[
-  ```json
-  {
-    "status": "failed",
-    "message": "Uses exhausted!",
-    "nonce": "<new_rotated_replay_nonce>"
-  }
-  ```
-  ]
-
-4. *Timestamp Verification*:
+== Timestamp verification
 
 - Client $->$ Server:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "request": "verify",
   "hash": "<hex_encoded_document_hash>",
@@ -267,42 +375,38 @@ These JSON objects are the payloads of the encrypted messages that client and se
 ```
 ]
 
-- Server $->$ Client:
+- Server $->$ Client, valid token:
 
-  - _Valid timestamp_:
+#text(size: 12pt)[
+```json
+{
+  "status": "success",
+  "valid": true,
+  "message": "Timestamp is valid!",
+  "nonce": "<new_replay_nonce>"
+}
+```
+]
 
-  #text(size: 14pt)[
-  ```json
-  {
-    "status": "success",
-    "valid": true,
-    "message": "Timestamp is valid!",
-    "nonce": "<new_rotated_replay_nonce>"
-  }
-  ```
-  ]
+- Server $->$ Client, invalid or modified token:
 
-  - _Invalid / Manipulated Timestamp_:
+#text(size: 12pt)[
+```json
+{
+  "status": "success",
+  "valid": false,
+  "message": "Invalid timestamp or altered data!",
+  "nonce": "<new_replay_nonce>"
+}
+```
+]
 
-  #text(size: 14pt)[
-  ```json
-  {
-    "status": "success",
-    "valid": false,
-    "message": "Invalid timestamp or altered data!",
-    "nonce": "<new_rotated_replay_nonce>"
-  }
-  ```
-  ]
-
-\
-
-5. *Quit Request*:
+== Quit
 
 - Client $->$ Server:
 
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 {
   "request": "quit",
   "nonce": "<current_replay_nonce>"
@@ -310,67 +414,67 @@ These JSON objects are the payloads of the encrypted messages that client and se
 ```
 ]
 
-- Server $->$ Client: None - the socket is closed by both parties.
+After this request, the socket is closed.
 
 #pagebreak()
 
-== Users credentials storage
+= Password Storage
 
-To safeguard user credentials against server-side compromises, plaintext passwords are never written to disk. The simulator database stores credentials structured as:
+The database simulator never stores plaintext passwords. Each user entry stores a bcrypt hash string plus the timestamp quota counters.
 
-\
-
-#text(size: 14pt)[
-  ```json
+#text(size: 12pt)[
+```json
 "Giacomo": {
-    "password": "$2b$12$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee",
-    "available": 0,
-    "used": 5
+  "password": "$2b$12$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee",
+  "available": 0,
+  "used": 5
 }
 ```
 ]
 
-\
+Bcrypt is appropriate here because it is intentionally slow compared with ordinary hash functions such as SHA256. If an attacker steals the JSON database, they cannot directly read the passwords. They must guess candidate passwords and run bcrypt for each guess.
 
-The following security properties are achieved:
+== Bcrypt string format
 
-1. *Rainbow Table Prevention*: The random 16-byte salt is _unique_ for every single database entry; precomputed tables of common password hashes cannot be used to recover passwords. If two users share the same password, their hashes will be different.
-
-2. *Timing Side-Channel Protection*: The verification routine extracts the salt and cost parameter from the stored string, hashes the input password using those exact parameters, and performs a *constant-time byte comparison of the resulting hashes*.
-
-\
-
-=== Bcrypt format
-
-The password hash string is exactly 60 characters long and adheres strictly to the modular crypt format utilized by _bcrypt_:
-
-\
+A bcrypt hash includes the algorithm version, cost parameter, salt, and final hash in one string.
 
 #align(center)[
-  Format: \$$<"Variant">$\$$<"Rounds">$\$$<"Salt">$\$$<"Hash">$
+  Format: \$$<"Variant">$\$$<"Cost">$\$$<"Salt and Hash">$
 ]
 
-\
+Example:
 
-_Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
+#text(size: 12pt)[
+```text
+$2b$12$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee
+```
+]
 
-- "_\$2b\$_": Identifies the bcrypt algorithm version. The _2b_ variant is the modern standard.
+Meaning:
 
-- "_\$12\$_": Defines the work factor as $2^12 = 4096$ iterations of the library underlying algorithm.
+- _\$2b\$_ identifies the bcrypt variant.
+- _\$12\$_ is the work factor. It means bcrypt uses $2^12 = 4096$ internal rounds.
+- _BKrwYnXiEXfTQHz2reiiN._ is the encoded salt.
+- _EHlvWOpnDlCznSo3sxg.AubUYTmBGee_ is the encoded hash output.
 
-- "_BKrwYnXiEXfTQHz2reiiN._": The salt of $22$ characters, randomly generated at registration time.
+The salt is generated randomly when a user is registered. Therefore, two users with the same password should still have different stored bcrypt strings.
 
-- "_EHlvWOpnDlCznSo3sxg.AubUYTmBGee_": Hash of $31$ characters.
-
-
+During login, the server calls _bcrypt.checkpw_. This function reads the cost and salt from the stored bcrypt string, hashes the submitted password with the same parameters, and reports whether the result matches.
 
 #pagebreak()
 
-= Communication protocol & Sequence diagram
+= Protocol Walkthrough
 
-1. *Connection & Cryptographic Handshake*: Establishes the secure channel using ephemeral X25519 keys, verifies server authenticity using the pre-shared RSA public key, and derives a session key with PFS.
+The following diagrams show the protocol as a sequence of steps. The important thing to notice is the order:
 
-\
+1. create and authenticate the secure channel;
+2. authenticate the user;
+3. issue a replay nonce;
+4. require and rotate that nonce for each later command.
+
+== Handshake
+
+The handshake establishes the encrypted channel and authenticates the server.
 
 #align(center)[
   #image("Diagrams/Handshake.png")
@@ -378,9 +482,9 @@ _Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
 
 #pagebreak()
 
-2. *Client Authentication (Login) & Nonce Initialization*: Validates the client's identity and issues the initial session nonce.
+== Login
 
-\
+After the channel is encrypted, the client sends username and password. If the credentials are valid, the server sends the first replay nonce.
 
 #align(center)[
   #image("Diagrams/Login.png")
@@ -388,62 +492,52 @@ _Example_ - "\$2b\$12\$BKrwYnXiEXfTQHz2reiiN.EHlvWOpnDlCznSo3sxg.AubUYTmBGee":
 
 #pagebreak()
 
+== Balance
 
-3. *Session operations*: For every subsequent transaction, the client submits the current nonce. The server validates it, rotates it, and returns the new nonce.
-
-- _Balance_:
-
-\
+The balance request shows how ordinary session commands work: the client sends the current replay nonce, and the server returns a new one.
 
 #align(center)[
   #image("Diagrams/Balance.png")
 ]
 
-\
+== Timestamping
 
-- _Timestamping_:
-
-\
+For timestamping, the client sends a document hash. The server checks the user's quota, generates the current UTC time, signs the hash and timestamp together, decreases the quota, and returns the token.
 
 #align(center)[
   #image("Diagrams/Timestamp.png")
 ]
 
-\
-
 #pagebreak()
 
-- _Verification_:
+== Verification
 
-\
+For verification, the server reconstructs the same bundle, $"hash" || "timestamp"_"bytes"$, and verifies the RSA-PSS signature with $"pubK"_"ts"$.
 
 #align(center)[
   #image("Diagrams/Veriffy.png")
 ]
 
-\
+== Quit
 
-- _Quit_:
-
-\
+The quit request closes the session.
 
 #align(center)[
   #image("Diagrams/Quit.png")
 ]
 
-\
-
 #pagebreak()
 
-= Demo logs
+= Demo Logs
+
+The following examples show the service behavior from the client point of view.
 
 == Successful timestamp
 
-\
+The user chooses option _2_, submits a document hash, and receives a timestamp token.
 
-
-#text(size: 14pt)[
-  ```text
+#text(size: 11pt)[
+```text
 Welcome! What do you want to do?
 0 - See my balance.
 1 - Verify timestamp.
@@ -459,23 +553,17 @@ Working on timestamping, please wait...
     "signature": "15d49ddf5e8d43bdecca5a9b037db49b48bad4995e75ea3dfa7528135dc4bdf90e...",
     "nonce": "77301cab77dcb540c7f01b27"
 }
-Welcome! What do you want to do?
-0 - See my balance.
-1 - Verify timestamp.
-2 - Timestamp an hash.
-3 - Quit.
-Send request n.
 ```
 ]
 
-\
+The returned signature is long because it is an RSA-4096 signature encoded in hexadecimal. The final nonce must be used in the next request.
 
 == Timestamp verification
 
-\
+The user chooses option _1_ and provides the hash, timestamp, and signature. The server verifies that the signature matches the hash and timestamp.
 
-#text(size: 14pt)[
-  ```text
+#text(size: 11pt)[
+```text
 Welcome! What do you want to do?
 0 - See my balance.
 1 - Verify timestamp.
@@ -496,13 +584,14 @@ Working on verification, please wait...
 ```
 ]
 
+The field _valid: true_ means that the signature verification succeeded.
+
 == Unsuccessful timestamp
 
+In this example the user has no remaining timestamp credits. The balance shows _available: 0_, so the next timestamp request fails.
 
-\
-
-#text(size: 14pt)[
-  ```text
+#text(size: 11pt)[
+```text
 [+] Connesso al server TSA su 127.0.0.1:1488
 [+] Connessione stabilita con server
 [>] Sending effimerate key to Server.
@@ -540,11 +629,39 @@ Working on timestamping, please wait...
     "message": "Uses exhausted!",
     "nonce": "6fbec3958f5b07e394c52ba9"
 }
-Welcome! What do you want to do?
-0 - See my balance.
-1 - Verify timestamp.
-2 - Timestamp an hash.
-3 - Quit.
-Send request n.
 ```
 ]
+
+#pagebreak()
+
+= Limitations and Assumptions
+
+The implementation demonstrates the main cryptographic ideas, but it also relies on several assumptions.
+
+1. *Trusted server public key distribution*
+
+  The client already has the authentic $"pubK"_"c"$ file. In a real deployment, this public key would need to be distributed through a trusted installation process, certificate, or other authenticated channel.
+
+2. *Local demonstration environment*
+
+  The server listens on _127.0.0.1:1488_. This is appropriate for testing and demonstration, but a real network deployment would require operational hardening.
+
+3. *JSON database simulator*
+
+  The database is a simple JSON file. This is clear for a university project, but it is not a production database with concurrency control, audit logs, backups, or access control.
+
+4. *Timestamp trust*
+
+  The timestamp is generated from the server system clock. Therefore, the correctness of the timestamp depends on the server clock being accurate and trusted.
+
+5. *Hash responsibility*
+
+  The server signs the hash it receives. It does not see the original document, so the user is responsible for computing the hash correctly and preserving the document.
+
+= Conclusion
+
+The project implements a complete educational timestamping service: it establishes an authenticated encrypted channel, protects user credentials, prevents simple replay of session commands, signs timestamp tokens, and verifies them later.
+
+The most important design idea is separation of responsibilities. X25519 and HKDF create fresh session keys, ChaCha20Poly1305 protects the communication, RSA-PSS authenticates the server and signs timestamp tokens, bcrypt protects stored passwords, and rotating replay nonces make captured requests unusable after they have been processed once.
+
+In short, the service lets a user prove that a document hash existed at a specific UTC time, while also showing how several cryptographic primitives cooperate inside a realistic client-server protocol.
