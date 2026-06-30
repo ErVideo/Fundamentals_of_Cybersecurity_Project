@@ -1,377 +1,413 @@
-# Cryptographic Timestamping Service (TSS) Analysis and Design Report (V2 - Replay Attack Mitigation)
+# Cryptographic Timestamping Service (TSS) Analysis and Design Report (V2 - Counter + PKI)
 
-This updated report analyzes version 2 of the Timestamping Service (TSS) provided in [Client.py](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Client/Client.py) and [Server.py](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/Server.py). This version introduces a dynamic, server-driven nonce mechanism to prevent replay attacks within an active session.
+This report describes the updated Timestamping Service implementation. This version uses:
+
+- a server certificate `certKc.pem` containing the connection-authentication public key `pubKc`;
+- a transcript-bound X25519 handshake with Perfect Forward Secrecy;
+- encrypted monotonic counters for replay protection after login;
+- RSA-PSS timestamp signatures with `privKts`.
 
 ---
 
 ## 1. Specifications and Design
 
 ### 1.1 Overview
-The Timestamping Service (TSS) is a client-server application implementing a trusted third-party Time Stamping Authority (TSA). It allows registered users to submit cryptographic hashes of files/documents and receive back a cryptographically signed token binding the document's hash to a trusted timestamp. Users can subsequently verify these tokens to prove a document's existence at a specific time.
+
+The Timestamping Service (TSS) is a client-server application implementing a trusted Time Stamping Authority (TSA). A registered user sends only the hash of a document, not the document itself. The server binds that hash to the current UTC time by signing:
+
+```text
+hash || timestamp
+```
+
+The returned timestamp token can later be verified using the TSA public signing key `pubKts`.
 
 ### 1.2 Architectural Components
-1. **TSA Server ([Server.py](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/Server.py))**: A TCP-based server listening on port `1488`. It handles connections, completes the secure handshake, validates credentials, tracks user token balances, issues timestamps, and verifies them.
-2. **Client ([Client.py](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Client/Client.py))**: A command-line client enabling users to connect to the server, authenticate, check their usage balance, request timestamps, and verify existing timestamps.
-3. **Database Simulator ([Database.py](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/Database.py))**: A persistent storage manager that manages registered users in a JSON file (`status.json`). It implements username/password authentication using `bcrypt` and handles usage counts (`available` and `used` timestamp quotas).
+
+1. **TSA Server (`Server/Server.py`)**: listens on `127.0.0.1:1488`, establishes the secure channel, authenticates users, tracks balances, signs timestamps, and verifies timestamp tokens.
+2. **Client (`Client/Client.py`)**: command-line client used to log in, request balance, timestamp a hash, verify a timestamp, and quit.
+3. **Database Simulator (`Server/Database.py`)**: JSON-backed user database storing bcrypt password hashes and timestamp quotas.
+4. **Key Material (`Server/TSA_Keys/`)**:
+   - `privKc.pem` / `certKc.pem`: server authentication key and certificate for the secure channel;
+   - `privKts.pem` / `pubKts.pem`: timestamp-signing key pair.
 
 ### 1.3 Cryptographic Security Features
-The service is built around solid cryptographic principles ensuring **Perfect Forward Secrecy (PFS)**, **authenticity**, **confidentiality**, and **integrity**.
 
-* **Server Authentication**: 
-  The server possesses a static RSA-4096 key pair: `(pubKts, privKts)`. The client pre-loads the public key [pubKts.pem](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/TSA_Keys/pubKts.pem). During the handshake, the server signs its ephemeral public key using `privKts`, allowing the client to verify the server's identity and prevent Man-in-the-Middle (MitM) attacks.
-* **Key Exchange (Perfect Forward Secrecy - PFS)**: 
-  Established using ephemeral **X25519 (ECDH)** keys. Both client and server generate a new key pair for every session. Even if the server's long-term RSA private key is compromised in the future, past session traffic cannot be decrypted since the session keys are never transmitted and are derived from ephemeral parameters.
-* **Key Derivation Function (KDF)**:
-  Once the X25519 shared secret is computed, both parties derive a 32-byte symmetric session key using **HKDF-SHA256** with an info parameter of `b"session encryption"`.
-* **Symmetric Session Encryption**:
-  All exchange messages post-handshake are encrypted using **ChaCha20Poly1305** (an Authenticated Encryption with Associated Data - AEAD scheme). This protects the communication against eavesdropping and ensures message integrity/non-malleability.
-* **Replay Attack Mitigation (Dynamic Nonce Challenge-Response)**:
-  To prevent replay attacks (where an attacker intercepts and repeats encrypted command messages within the session), a dynamic nonce-based challenge-response mechanism is implemented:
-  1. Upon successful login, the server generates a cryptographically secure random 12-byte hex nonce: [Server.py L254-256](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/Server.py#L254-L256).
-  2. The server returns this nonce to the client inside the login outcome JSON.
-  3. For every subsequent request (balance, timestamp, verify, quit), the client must include the current nonce in the request payload: [Client.py L209-222](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Client/Client.py#L209-L222).
-  4. The server decrypts the payload and verifies that the request nonce matches the expected session nonce: [Server.py L280-283](file:///C:/Didattica/Foundation_of_cybersecurity/Project/Server/Server.py#L280-L283). If it does not, the server immediately drops the connection.
-  5. If the nonce is valid, the server immediately generates a new 12-byte random hex nonce, invalidating the old one, and includes the new nonce in its response JSON, which the client stores for its next request.
+* **Server Authentication with Certificate**:
+  The client loads the trusted server certificate `certKc.pem`, verifies it as its local trust anchor, extracts `pubKc`, and uses that public key to verify the server handshake signature. In this educational implementation, the certificate is self-signed and provisioned out-of-band.
+
+* **Transcript-Bound Handshake**:
+  Client and server exchange ephemeral X25519 public keys and 32-byte handshake nonces. The server signs the full transcript:
+
+  ```text
+  client_pub || client_nonce || server_pub || server_nonce
+  ```
+
+  This binds the server authentication to the exact handshake session.
+
+* **Perfect Forward Secrecy**:
+  Both parties derive the same X25519 shared secret from ephemeral keys. The session key is derived with HKDF-SHA256 using:
+
+  ```text
+  salt = client_nonce || server_nonce
+  info = b"session encryption"
+  ```
+
+* **Authenticated Encryption**:
+  After the handshake, all JSON messages are encrypted and authenticated with `ChaCha20Poly1305`. The 12-byte AEAD nonce is transmitted with the ciphertext, while the replay counter is inside the encrypted JSON payload.
+
+* **Replay Protection with Counter**:
+  After login, the server initializes an expected counter to `0`. Each client request must include the current counter inside the encrypted payload. If the counter is correct, the server increments it and returns the new value in its encrypted response. Replayed messages contain an old counter and are rejected.
+
 * **Timestamp Signatures**:
-  When a user requests a timestamp for a hash, the server binds the binary hash to the UTC timestamp string (`%Y-%m-%dT%H:%M:%SZ`) by signing the concatenated bundle `hash || timestamp_bytes` using the TSA's long-term RSA private key (`privKts`) with **RSA-PSS** padding, MGF1-SHA256, and SHA256.
+  The server signs `hash || timestamp` with `privKts` using RSA-PSS and SHA-256. Verification uses `pubKts`.
 
 ---
 
 ## 2. Exchanged Message Formats
 
 ### 2.1 Communication Framing
-After the initial handshake, all communication employs a structured length-prefixed protocol:
-1. **Header**: 4 bytes, Big-Endian Unsigned Integer (`>I`), indicating the length of the payload in bytes.
-2. **Payload**: The actual message bytes. For encrypted messages, the payload is structured as:
-   * **Nonce**: 12 bytes (ChaCha20Poly1305 initialization vector).
-   * **Ciphertext**: Variable bytes (the encrypted JSON string of the message).
 
----
+After the initial handshake, messages are length-prefixed:
+
+```text
+4-byte big-endian payload length || payload
+```
+
+Encrypted payloads are:
+
+```text
+12-byte ChaCha20Poly1305 nonce || ciphertext_and_tag
+```
+
+The AEAD nonce is not the replay counter. The replay counter is encrypted inside the JSON payload.
 
 ### 2.2 Plaintext Handshake Messages
-During the handshake, keys are exchanged in raw binary format without encryption or framing:
 
-#### 1. Client Ephemeral Public Key (Client -> Server)
-* **Size**: 32 bytes.
-* **Format**: Raw X25519 public key bytes.
+#### 1. Client Hello
 
-#### 2. Server Ephemeral Key + Signature (Server -> Client)
-* **Size**: 544 bytes.
-* **Format**: `server_pub_bytes` (32 bytes) concatenated with `signature` (512 bytes).
-  * The signature is an RSA-4096 signature over the 32-byte `server_pub_bytes`.
-
-#### 3. Handshake Confirmation (Server -> Client)
-* **Format**: Length-prefixed message (4-byte header + 20-byte payload).
-* **Payload**: `b"Handshake successful"` (ASCII).
-
----
-
-### 2.3 Post-Handshake Encrypted Messages (JSON Schemes inside Ciphertext)
-
-#### 1. Authentication (Login)
-* **Request (Client -> Server)**:
-  ```json
-  {
-    "username": "<username_string>",
-    "password": "<password_string>"
-  }
-  ```
-* **Response (Server -> Client)**:
-  * *Success*: Includes the first replay-prevention nonce.
-    ```json
-    {
-      "status": "success",
-      "nonce": "<12_byte_hex_nonce>"
-    }
-    ```
-  * *Failure*: The server closes the socket connection immediately.
-
-#### 2. Balance Check
-* **Request (Client -> Server)**:
-  ```json
-  {
-    "request": "balance",
-    "nonce": "<current_replay_nonce>"
-  }
-  ```
-* **Response (Server -> Client)**:
-  ```json
-  {
-    "available": <integer_remaining_tokens>,
-    "used": <integer_consumed_tokens>,
-    "nonce": "<new_rotated_replay_nonce>"
-  }
-  ```
-
-#### 3. Hash Timestamping
-* **Request (Client -> Server)**:
-  ```json
-  {
-    "request": "timestamp",
-    "hash": "<hex_encoded_document_hash>",
-    "nonce": "<current_replay_nonce>"
-  }
-  ```
-* **Response (Server -> Client)**:
-  * *Success*:
-    ```json
-    {
-      "hash": "<hex_encoded_document_hash>",
-      "timestamp": "<UTC_time_string_formatted_as_YYYY-MM-DDTHH:MM:SSZ>",
-      "signature": "<hex_encoded_rsa_pss_signature>",
-      "nonce": "<new_rotated_replay_nonce>"
-    }
-    ```
-  * *Failure (Quota Exhausted)*:
-    ```json
-    {
-      "status": "failed",
-      "message": "Uses exhausted!",
-      "nonce": "<new_rotated_replay_nonce>"
-    }
-    ```
-
-#### 4. Timestamp Verification
-* **Request (Client -> Server)**:
-  ```json
-  {
-    "request": "verify",
-    "hash": "<hex_encoded_document_hash>",
-    "timestamp": "<UTC_time_string>",
-    "signature": "<hex_encoded_rsa_pss_signature>",
-    "nonce": "<current_replay_nonce>"
-  }
-  ```
-* **Response (Server -> Client)**:
-  * *Valid Timestamp*:
-    ```json
-    {
-      "status": "success",
-      "valid": true,
-      "message": "Timestamp is valid!",
-      "nonce": "<new_rotated_replay_nonce>"
-    }
-    ```
-  * *Invalid / Manipulated Timestamp*:
-    ```json
-    {
-      "status": "success",
-      "valid": false,
-      "message": "Invalid timestamp or altered data!",
-      "nonce": "<new_rotated_replay_nonce>"
-    }
-    ```
-
-#### 5. Quit Request
-* **Request (Client -> Server)**:
-  ```json
-  {
-    "request": "quit",
-    "nonce": "<current_replay_nonce>"
-  }
-  ```
-* **Response**: None (the socket is closed by both parties).
-
----
-
-## 3. Communication Protocols & Sequence Diagrams
-
-### Protocol 1: Connection & Cryptographic Handshake
-Establishes the secure channel using ephemeral X25519 keys, verifies server authenticity using the pre-shared RSA public key, and derives a session key with PFS.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as Client App
-    participant Server as TSA Server
-    
-    Note over Client, Server: TCP Connection Establishment
-    Client->>Server: Connects to TCP Port 1488
-    Server-->>Client: TCP Connection Accepted
-    
-    Note over Client, Server: Handshake & Cryptographic Setup
-    Note over Client: Generates X25519 Ephemeral Key Pair<br/>(priv_kc_ephemeral, pub_kc_ephemeral)
-    Client->>Server: Send pub_kc_ephemeral (Raw 32 bytes)
-    
-    Note over Server: Generates X25519 Ephemeral Key Pair<br/>(PrivKc, PubKc)
-    Note over Server: Signs server's PubKc bytes using privKts (RSA-4096)
-    Server->>Client: Send PubKc (32 bytes) + RSA Signature (512 bytes)
-    
-    Note over Client: Verifies signature using pubKts (RSA-4096)
-    alt Verification Fails (Possible MitM Attack)
-        Note over Client: Prints "MitM ATTACK DETECTED"
-        Client->>Server: Closes Connection
-    else Verification Succeeds (Server Authenticated)
-        Note over Client: Prints "[SERVER AUTHENTICATED]"
-        Note over Client: Computes Shared Secret (X25519)
-        Note over Server: Computes Shared Secret (X25519)
-        Note over Client, Server: Derives session_key via HKDF-SHA256
-        Note over Client, Server: Instantiates ChaCha20Poly1305 Cipher
-        Server->>Client: Length-prefixed confirmation payload: b"Handshake successful"
-        Note over Client: Prints "[+] Server says: Handshake successful"
-    end
-```
-
----
-
-### Protocol 2: Client Authentication (Login) & Nonce Initialization
-Validates the client's identity and issues the initial session nonce.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as Client App
-    participant Server as TSA Server
-    
-    Note over Client: Prompt user for username and password
-    Note over Client: Encrypt credentials dict with ChaCha20Poly1305
-    Client->>Server: Encrypted message: {"username": username, "password": password}
-    
-    Note over Server: Decrypts credentials dict
-    Note over Server: Validates credentials using bcrypt.checkpw()
-    alt Credentials Invalid
-        Note over Server: Prints login failure
-        Server->>Client: Closes Connection
-        Note over Client: Prints "[-] Login failed!" and exits
-    else Credentials Valid
-        Note over Server: Prints login success
-        Note over Server: Generates initial session nonce (nonce_1) 
-        Server->>Client: Encrypted response: {"status": "success", "nonce": nonce_1}
-        Note over Client: Decrypts status dict
-        Note over Client: Stores nonce_1 in replay_nonce variable
-        Note over Client: Prints "[+] Login success!"
-    end
-```
-
----
-
-### Protocol 3: Session Operations (Dynamic Nonce Challenge & Rotation)
-For every subsequent transaction, the client submits the current nonce. The server validates it, rotates it, and returns the new nonce.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Client as Client App
-    participant Server as TSA Server
-
-    %% Option 0: Balance Check
-    rect rgb(240, 248, 255)
-    Note over Client: User selects Balance Check
-    Client->>Server: Encrypted request with nonce_1: {"request": "balance", "nonce": nonce_1}
-    
-    Note over Server: Decrypts request
-    alt request["nonce"] != expected_nonce (Replay Attack)
-        Note over Server: Prints "[- ] Replay attack detected!"
-        Server->>Client: Closes Connection
-    else request["nonce"] == expected_nonce (Valid request)
-        Note over Server: Retrieve records from status.json
-        Note over Server: Generates new session nonce (nonce_2)
-        Server->>Client: Encrypted response: {"available": X, "used": Y, "nonce": nonce_2}
-        Note over Client: Decrypts response
-        Note over Client: Updates replay_nonce variable to nonce_2
-        Note over Client: Prints balance details
-    end
-    end
-
-    %% Option 2: Timestamping
-    rect rgb(245, 245, 220)
-    Note over Client: User requests Timestamping for a document hash
-    Client->>Server: Encrypted request with nonce_2: {"request": "timestamp", "hash": "<hex_hash>", "nonce": nonce_2}
-    
-    Note over Server: Decrypts request and checks nonce == nonce_2
-    Note over Server: Checks quota availability (available > 0)
-    Note over Server: Generates new session nonce (nonce_3)
-    alt Balance == 0
-        Server->>Client: Encrypted failure: {"status": "failed", "message": "Uses exhausted!", "nonce": nonce_3}
-    else Balance > 0
-        Note over Server: Generates UTC time string<br/>bundle = hash_bytes + time_bytes
-        Note over Server: Signs bundle with RSA-4096 (privKts)
-        Note over Server: Decrements available, increments used, stores DB
-        Server->>Client: Encrypted response: {"hash": "<hex>", "timestamp": "<time>", "signature": "<sig>", "nonce": nonce_3}
-    end
-    Note over Client: Decrypts response and updates replay_nonce variable to nonce_3
-    end
-
-    %% Option 1: Verification
-    rect rgb(230, 250, 230)
-    Note over Client: User requests Verification
-    Client->>Server: Encrypted request with nonce_3: {"request": "verify", "hash": "<hex>", "timestamp": "<time>", "signature": "<sig>", "nonce": nonce_3}
-    
-    Note over Server: Decrypts request and checks nonce == nonce_3
-    Note over Server: Reconstructs bundle = hash_bytes + time_bytes
-    Note over Server: Verifies signature using pubKts
-    Note over Server: Generates new session nonce (nonce_4)
-    alt Verification Succeeds
-        Server->>Client: Encrypted response: {"status": "success", "valid": true, "message": "Timestamp is valid!", "nonce": nonce_4}
-    else Verification Fails
-        Server->>Client: Encrypted response: {"status": "success", "valid": false, "message": "Invalid timestamp...", "nonce": nonce_4}
-    end
-    Note over Client: Decrypts response and updates replay_nonce variable to nonce_4
-    end
-
-    %% Option 3: Quit
-    rect rgb(255, 230, 230)
-    Note over Client: User selects Quit
-    Client->>Server: Encrypted request with nonce_4: {"request": "quit", "nonce": nonce_4}
-    Note over Server: Decrypts request and checks nonce == nonce_4
-    Client->>Server: Closes Connection
-    Server->>Client: Closes Connection
-    end
-```
-
----
-
-## 4. Demonstration Run Scenario (Dynamic Nonce Walkthrough)
-
-The following walkthrough illustrates the system log trace showing how nonces are updated and verified:
-
-### 4.1 Scenario A: Successful Session Flow (Login & Balance Check)
-Using the account `Mattia`:
-
-**Client Console Output:**
 ```text
-[+] Connesso al server TSA su 127.0.0.1:1488
-[+] Connessione stabilita con server
-[>] Sending effimerate key to Server.
-[+] [SERVER AUTHENTICATED]
-[+] Canale sicuro stabilito (PFS abilitato).
-[+] Server says: Handshake successful
-Please insert your username:
-Mattia
-Please insert your password:
-password123
-[+] Login success!
-Welcome! What do you want to do?
-0 - See my balance.
-1 - Verify timestamp.
-2 - Timestamp an hash.
-3 - Quit.
-Send request n. 0
-[+] Server replied with:
+client_pub_bytes || client_nonce
+32 bytes         || 32 bytes
+```
+
+Total size: `64` bytes.
+
+#### 2. Server Hello
+
+```text
+server_pub_bytes || server_nonce || RSA-PSS signature
+32 bytes         || 32 bytes     || 512 bytes
+```
+
+Total size: `576` bytes.
+
+The signature is over:
+
+```text
+client_pub_bytes || client_nonce || server_pub_bytes || server_nonce
+```
+
+#### 3. Handshake Confirmation
+
+Length-prefixed plaintext payload:
+
+```text
+b"Handshake successful"
+```
+
+### 2.3 Post-Handshake Encrypted JSON Messages
+
+#### Login
+
+Client to server:
+
+```json
 {
-    "available": 10,
-    "used": 0,
-    "nonce": "a7c8e9f2d1b09384726c105e"
+  "username": "<username_string>",
+  "password": "<password_string>"
 }
 ```
 
-*Note: In the login response payload, the client received the initial nonce: `"nonce": "a7c8e9f2d1b09384726c105e"`. When the client chose Option `0`, the client sent this nonce to the server. The server validated it, rotated it, and replied with the new nonce `"a7c8e9f2d1b09384726c105e"`.*
+Server to client:
+
+```json
+{
+  "status": "success",
+  "counter": 0
+}
+```
+
+#### Balance
+
+Client to server:
+
+```json
+{
+  "request": "balance",
+  "counter": <current_counter>
+}
+```
+
+Server to client:
+
+```json
+{
+  "available": <integer_remaining_tokens>,
+  "used": <integer_consumed_tokens>,
+  "counter": <next_counter>
+}
+```
+
+#### Timestamp
+
+Client to server:
+
+```json
+{
+  "request": "timestamp",
+  "hash": "<hex_encoded_document_hash>",
+  "counter": <current_counter>
+}
+```
+
+Server to client, success:
+
+```json
+{
+  "hash": "<hex_encoded_document_hash>",
+  "timestamp": "<UTC_time_string>",
+  "signature": "<hex_encoded_rsa_pss_signature>",
+  "counter": <next_counter>
+}
+```
+
+Server to client, exhausted quota:
+
+```json
+{
+  "status": "failed",
+  "message": "Uses exhausted!",
+  "counter": <next_counter>
+}
+```
+
+#### Verification
+
+Client to server:
+
+```json
+{
+  "request": "verify",
+  "hash": "<hex_encoded_document_hash>",
+  "timestamp": "<UTC_time_string>",
+  "signature": "<hex_encoded_rsa_pss_signature>",
+  "counter": <current_counter>
+}
+```
+
+Server to client:
+
+```json
+{
+  "status": "success",
+  "valid": true,
+  "message": "Timestamp is valid!",
+  "counter": <next_counter>
+}
+```
+
+or:
+
+```json
+{
+  "status": "success",
+  "valid": false,
+  "message": "Invalid timestamp or altered data!",
+  "counter": <next_counter>
+}
+```
+
+#### Quit
+
+Client to server:
+
+```json
+{
+  "request": "quit",
+  "counter": <current_counter>
+}
+```
+
+The connection is closed after the request is accepted.
 
 ---
 
-### 4.2 Scenario B: Replay Attack Detection
-Suppose an eavesdropper records the encrypted network packet of the balance request sent in Scenario A (which contains `nonce_1 = a7c8e9f2d1b09384726c105e`). If they replay this exact packet later:
+## 3. Communication Protocols and Mermaid Sources
 
-**Server Console Output:**
-```text
-[*] Server in ascolto su 127.0.0.1:1488...
-[+] Connessione stabilita con ('127.0.0.1', 54910)
-[<] Received client effimerate key.
-[>] Effimerate + signature sent to client.
-[+] Canale sicuro stabilito con successo (PFS abilitato).
-[+] Handshake with ('127.0.0.1', 54910) successful
-[+] Client credentials received: {'username': 'Mattia', 'password': 'password123'}
-[-] Replay attack detected!
+The following Mermaid sources correspond to the PNG diagrams in `Report/Diagrams/`.
+
+### 3.1 Handshake
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client,Server: TCP connection establishment
+    Client->>Server: Connect to 127.0.0.1:1488
+    Server-->>Client: TCP accepted
+
+    Note over Client: Load trusted certKc.pem
+    Note over Client: Verify certificate and extract pubKc
+    Note over Client: Generate X25519 ephemeral key pair
+    Note over Client: Generate client_nonce (32 bytes)
+    Client->>Server: client_pub (32B) || client_nonce (32B)
+
+    Note over Server: Generate X25519 ephemeral key pair
+    Note over Server: Generate server_nonce (32 bytes)
+    Note over Server: transcript = client_pub || client_nonce || server_pub || server_nonce
+    Note over Server: Sign transcript with privKc
+    Server->>Client: server_pub (32B) || server_nonce (32B) || signature (512B)
+
+    Note over Client: Rebuild transcript
+    Note over Client: Verify signature using pubKc from certKc
+    alt Verification fails
+        Note over Client: MitM / replay detected
+        Client->>Server: Close connection
+    else Verification succeeds
+        Note over Client,Server: Compute X25519 shared secret
+        Note over Client,Server: HKDF-SHA256, salt = client_nonce || server_nonce
+        Note over Client,Server: Instantiate ChaCha20Poly1305
+        Server->>Client: b"Handshake successful"
+    end
 ```
 
-*Explanation: The server expects the newly rotated session nonce `nonce_2`. When the replayed packet is processed, the decrypted JSON contains `nonce_1`. The check `if json_message.get("nonce") != nonce_replay:` triggers, printing `[-] Replay attack detected!` and the server immediately drops the TCP connection to mitigate the attack.*
+### 3.2 Login and Counter Initialization
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client: Prompt username and password
+    Client->>Server: Encrypted {"username": username, "password": password}
+    Note over Server: Decrypt credentials
+    Note over Server: Verify password with bcrypt.checkpw()
+
+    alt Credentials invalid
+        Server->>Client: Close connection
+        Note over Client: Login failed
+    else Credentials valid
+        Note over Server: Initialize expected_counter = 0
+        Server->>Client: Encrypted {"status": "success", "counter": 0}
+        Note over Client: Store replay_counter = 0
+        Note over Client: Login success
+    end
+```
+
+### 3.3 Balance
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client: User selects balance
+    Client->>Server: Encrypted {"request": "balance", "counter": 0}
+    Note over Server: Decrypt request
+
+    alt counter != expected_counter
+        Note over Server: Replay detected
+        Server->>Client: Close connection
+    else counter == expected_counter
+        Note over Server: Increment expected_counter to 1
+        Note over Server: Read available/used from status.json
+        Server->>Client: Encrypted {"available": X, "used": Y, "counter": 1}
+        Note over Client: Store replay_counter = 1
+    end
+```
+
+### 3.4 Timestamp
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client: User requests timestamp for a hash
+    Client->>Server: Encrypted {"request": "timestamp", "hash": "<hex_hash>", "counter": 1}
+    Note over Server: Decrypt request and check counter
+    Note over Server: Increment expected_counter to 2
+    Note over Server: Check quota availability
+
+    alt available == 0
+        Server->>Client: Encrypted {"status": "failed", "message": "Uses exhausted!", "counter": 2}
+    else available > 0
+        Note over Server: Generate UTC timestamp
+        Note over Server: bundle = hash_bytes || timestamp_bytes
+        Note over Server: Sign bundle with privKts
+        Note over Server: Decrement available, increment used
+        Server->>Client: Encrypted {"hash": "<hex>", "timestamp": "<time>", "signature": "<sig>", "counter": 2}
+    end
+
+    Note over Client: Store replay_counter = 2
+```
+
+### 3.5 Verification
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client: User requests timestamp verification
+    Client->>Server: Encrypted {"request": "verify", "hash": "<hex>", "timestamp": "<time>", "signature": "<sig>", "counter": 2}
+    Note over Server: Decrypt request and check counter
+    Note over Server: Increment expected_counter to 3
+    Note over Server: Rebuild bundle = hash_bytes || timestamp_bytes
+    Note over Server: Verify signature using pubKts
+
+    alt Signature valid
+        Server->>Client: Encrypted {"status": "success", "valid": true, "message": "Timestamp is valid!", "counter": 3}
+    else Signature invalid
+        Server->>Client: Encrypted {"status": "success", "valid": false, "message": "Invalid timestamp...", "counter": 3}
+    end
+
+    Note over Client: Store replay_counter = 3
+```
+
+### 3.6 Quit
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as Client App
+    participant Server as TSA Server
+
+    Note over Client: User selects quit
+    Client->>Server: Encrypted {"request": "quit", "counter": 3}
+    Note over Server: Decrypt request and check counter
+    Client->>Server: Close connection
+    Server-->>Client: Connection closed
+```
+
+---
+
+## 4. Demonstration Notes
+
+A normal demo should show:
+
+1. server startup;
+2. client handshake with certificate-based server authentication;
+3. login with an existing user, for example `Mattia / Mattia`;
+4. balance request with counter `0`, response with counter `1`;
+5. timestamp request with counter `1`, response with counter `2`;
+6. verification request with counter `2`, response with counter `3`;
+7. unsuccessful timestamping using an account with exhausted quota.
+
+If an old encrypted request is replayed, the decrypted counter no longer matches the server's expected counter, so the server closes the connection.
