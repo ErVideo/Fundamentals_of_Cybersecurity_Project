@@ -3,6 +3,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
+from cryptography import x509
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from datetime import datetime, timezone
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -20,12 +21,17 @@ ERROR = "Error"
 pubKc = ""
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PATH_PUB_KC = "../Server/TSA_Keys/pubKc.pem"
+PATH_CERT_KC = "../Server/TSA_Keys/certKc.pem"
 
-# Load server secure-channel authentication public key
-with open(f"{BASE_DIR}/{PATH_PUB_KC}", "rb") as key_file:
-    pubKc = serialization.load_pem_public_key(
-        key_file.read()
+# Load server secure-channel authentication certificate
+with open(f"{BASE_DIR}/{PATH_CERT_KC}", "rb") as cert_file:
+    certKc = x509.load_pem_x509_certificate(cert_file.read())
+    pubKc = certKc.public_key()
+    pubKc.verify(
+        certKc.signature,
+        certKc.tbs_certificate_bytes,
+        padding.PKCS1v15(),
+        certKc.signature_hash_algorithm
     )
 
 def send_structured_message(conn, payload_bytes):

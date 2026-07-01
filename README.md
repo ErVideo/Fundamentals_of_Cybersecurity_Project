@@ -183,7 +183,7 @@ pubKts / privKts for timestamp signatures
 
 This implementation uses both pairs:
 
-- `privKc / pubKc` authenticate the server during the secure-channel handshake.
+- `privKc / certKc` authenticate the server during the secure-channel handshake. The certificate contains `pubKc`.
 - `privKts / pubKts` sign and verify timestamp tokens.
 
 To regenerate both key pairs, run:
@@ -192,4 +192,4 @@ To regenerate both key pairs, run:
 python Server/Signing_key_generation.py
 ```
 
-This overwrites the existing files in `Server/TSA_Keys/`.
+This overwrites the existing files in `Server/TSA_Keys/`, including the server certificate `certKc.pem`.

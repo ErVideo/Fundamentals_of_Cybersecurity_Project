@@ -1,6 +1,9 @@
 import os
+from datetime import datetime, timedelta, timezone
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.x509.oid import NameOID
 
 # Crea la cartella per le chiavi se non esiste
 os.makedirs("TSA_Keys", exist_ok=True)
@@ -14,6 +17,21 @@ privKc = rsa.generate_private_key(
 
 # 2. Estrai la chiave pubblica corrispondente
 pubKc = privKc.public_key()
+
+# 2b. Crea un certificato self-signed per associare identità del server e pubKc
+subject = issuer = x509.Name([
+    x509.NameAttribute(NameOID.COMMON_NAME, "Timestamping Service"),
+])
+certKc = (
+    x509.CertificateBuilder()
+    .subject_name(subject)
+    .issuer_name(issuer)
+    .public_key(pubKc)
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.now(timezone.utc))
+    .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+    .sign(privKc, hashes.SHA256())
+)
 
 # 3. Salva la chiave privata in chiaro (NoEncryption)
 with open("TSA_Keys/privKc.pem", "wb") as f:
@@ -33,6 +51,10 @@ with open("TSA_Keys/pubKc.pem", "wb") as f:
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
     )
+
+# 5. Salva il certificato del server
+with open("TSA_Keys/certKc.pem", "wb") as f:
+    f.write(certKc.public_bytes(serialization.Encoding.PEM))
 
 print("[*] Generazione della coppia di chiavi di firma TSA (RSA-4096)...")
 # 1. Genera la chiave privata a lungo termine
